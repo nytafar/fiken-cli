@@ -1,0 +1,28 @@
+# Secrets / local config — NEVER commit
+.env
+*.env
+config.toml
+agentcookie-local.toml
+
+# Local financial data (mirror + irreplaceable core DB)
+*.db
+*.db-wal
+*.db-shm
+
+# Build artifacts
+/fiken-cli
+/fiken-mcp
+/build/
+/bin/
+*.mcpb
+
+# Transient run outputs
+/dogfood-results.json
+/workflow-verify-report.json
+
+# Local polish ledgers (not published)
+.printing-press-pii-polish.json
+.printing-press-tools-polish.json
+
+# OS
+.DS_Store
