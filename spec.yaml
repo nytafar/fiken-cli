@@ -3358,6 +3358,7 @@ paths:
               description: Full URL of newly created sale
 
   /companies/{companySlug}/purchases:
+    x-resource-id: purchaseId
     parameters:
       - $ref: '#/components/parameters/companySlug'
     get:

@@ -1944,7 +1944,7 @@ var resourceIDFieldOverrides = map[string]string{
 	"journal_entries": "journalEntryId",
 	"products":        "productId",
 	"projects":        "projectId",
-	"purchases":       "currency",
+	"purchases":       "purchaseId",
 	"sales":           "saleId",
 	"transactions":    "transactionId",
 }
