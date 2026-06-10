@@ -1,0 +1,18 @@
+# agentcookie.toml: secrets-bus adoption manifest v2
+# See docs/spec-agentcookie-secrets-bus-v2-adoption.md
+schema_version = 2
+name = "fiken-cli"
+display_name = "Fiken"
+description = "The agent-native Fiken CLI: full read coverage with offline search and a local SQLite mirror, plus the gated, audited, idempotent write and bank-reconciliation layer no other Fiken tool has."
+project_kind = "cli"
+
+[secrets.file]
+path = "~/.config/fiken-cli/config.toml"
+
+[sync]
+default = false
+
+[sync.keys]
+FIKEN_API_TOKEN = true
+FIKEN_CLIENT_ID = false
+FIKEN_CLIENT_SECRET = true

@@ -1,0 +1,126 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-06-10T09:06:02.758423Z",
+  "printing_press_version": "4.24.0",
+  "api_name": "fiken",
+  "display_name": "Fiken",
+  "cli_name": "fiken-cli",
+  "creator": {
+    "handle": "nytafar",
+    "name": "Lasse Jellum"
+  },
+  "owner": "nytafar",
+  "printer": "nytafar",
+  "printer_name": "Lasse Jellum",
+  "spec_path": "fiken-swagger-enriched.yaml",
+  "spec_format": "openapi3",
+  "spec_checksum": "sha256:2f8ac3f2a9dd4dbf8ea43757100e6ee4ee2d3ef7646e622c2a50ce1eac12a607",
+  "run_id": "20260609-145046",
+  "description": "The agent-native Fiken CLI: full read coverage with offline search and a local SQLite mirror, plus the gated, audited, idempotent write and bank-reconciliation layer no other Fiken tool has.",
+  "mcp_binary": "fiken-mcp",
+  "mcp_tool_count": 153,
+  "mcp_ready": "full",
+  "api_version": "2.0.0",
+  "auth_type": "bearer_token",
+  "auth_env_vars": [
+    "FIKEN_API_TOKEN",
+    "FIKEN_CLIENT_ID",
+    "FIKEN_CLIENT_SECRET"
+  ],
+  "auth_env_var_specs": [
+    {
+      "name": "FIKEN_API_TOKEN",
+      "kind": "per_call",
+      "required": false,
+      "sensitive": true,
+      "description": "Personal API token (Fiken -\u003e Settings -\u003e API -\u003e Personlige API-nokler). Sent as a Bearer token; never expires; ToS-clean for your own companies. Set this OR run 'auth login' for OAuth2."
+    },
+    {
+      "name": "FIKEN_CLIENT_ID",
+      "kind": "auth_flow_input",
+      "required": false,
+      "sensitive": false,
+      "description": "OAuth2 client ID, used only by 'auth login' when acting on behalf of other companies. Not needed if you use a personal API token."
+    },
+    {
+      "name": "FIKEN_CLIENT_SECRET",
+      "kind": "auth_flow_input",
+      "required": false,
+      "sensitive": true,
+      "description": "OAuth2 client secret, used only by 'auth login'. Not needed if you use a personal API token."
+    }
+  ],
+  "auth_key_url": "https://fiken.no/",
+  "novel_features": [
+    {
+      "name": "Unverified-against-bank detector",
+      "command": "bank-unverified",
+      "description": "Lists postings on your bank accounts that aren't yet matched to the bank statement, and shows the exact ledger-vs-reconciled gap per account."
+    },
+    {
+      "name": "Client-side posting validation",
+      "command": "validate",
+      "description": "Dry-runs a proposed posting before it touches the books: balanced debit/credit in øre, account exists, MVA code plausible for the account, period open, date sane."
+    },
+    {
+      "name": "Idempotent audited commit",
+      "command": "commit",
+      "description": "Posts a validated purchase or journal entry through a guarded path: deduped against the idempotency map, date-aligned to the expected bank-line date, X-Request-ID stamped, and recorded in an append-only audit log in the same call."
+    },
+    {
+      "name": "Imbalance \u0026 rounding-drift finder",
+      "command": "drift",
+      "description": "Scans journal entries for debit≠credit imbalances and sub-krone øreavrunding drift using exact integer-øre arithmetic."
+    },
+    {
+      "name": "VAT-code anomaly detector",
+      "command": "vat-anomaly",
+      "description": "Flags sale/purchase lines whose VAT code is implausible for the account or deviates from how that vendor is usually posted."
+    },
+    {
+      "name": "MVA / VAT-period summary",
+      "command": "mva-summary",
+      "description": "Reconstructs a VAT-return-shaped view from local lines: net basis and output/input VAT bucketed per VAT code, for any period."
+    },
+    {
+      "name": "Period BI rollup",
+      "command": "rollup",
+      "description": "Grouped revenue/cost/margin rollups over the local mirror by month, account, project, or contact."
+    },
+    {
+      "name": "Posting proposal builder",
+      "command": "prepare",
+      "description": "Turns an inbox document into a structured posting proposal: pulls the bilag, the vendor's posting history, candidate accounts, and the valid MVA codes in one call."
+    },
+    {
+      "name": "Audited reversal",
+      "command": "reverse",
+      "description": "Reverses a posting with a correcting entry or soft-delete, recording the link back to the original in the audit log."
+    },
+    {
+      "name": "Duplicate-posting suspicion",
+      "command": "duplicates",
+      "description": "Surfaces suspected double-postings: the same contact and øre amount within a date window across purchases and sales."
+    },
+    {
+      "name": "Payment reconciliation",
+      "command": "reconcile",
+      "description": "Registers and settles payments on sales and purchases, including clearing-account journal entries for payment processors."
+    },
+    {
+      "name": "Audit event sink",
+      "command": "log-event",
+      "description": "Appends a grammar-validated event to the append-only audit log; warns on an unknown operation name but never rejects."
+    },
+    {
+      "name": "Missing-bilag report",
+      "command": "missing-bilag",
+      "description": "Lists postings in a period that have no attached documentation (empty attachments)."
+    },
+    {
+      "name": "Vendor posting-history profile",
+      "command": "vendor-profile",
+      "description": "Shows how a vendor is usually posted: the modal account and VAT code, with frequency and last-used."
+    }
+  ]
+}

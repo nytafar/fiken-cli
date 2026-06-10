@@ -1,0 +1,59 @@
+{
+  "manifest_version": "0.3",
+  "name": "fiken-mcp",
+  "display_name": "Fiken",
+  "version": "0.0.0",
+  "description": "The agent-native Fiken CLI: full read coverage with offline search and a local SQLite mirror, plus the gated, audited, idempotent write and bank-reconciliation layer no other Fiken tool has.",
+  "author": {
+    "name": "CLI Printing Press"
+  },
+  "license": "Apache-2.0",
+  "server": {
+    "type": "binary",
+    "entry_point": "bin/fiken-mcp",
+    "mcp_config": {
+      "command": "${__dirname}/bin/fiken-mcp",
+      "args": [],
+      "env": {
+        "FIKEN_API_TOKEN": "${user_config.fiken_api_token}",
+        "FIKEN_CLIENT_ID": "${user_config.fiken_client_id}",
+        "FIKEN_CLIENT_SECRET": "${user_config.fiken_client_secret}",
+        "FIKEN_NO_LOCK": "${user_config.fiken_no_lock}"
+      }
+    }
+  },
+  "user_config": {
+    "fiken_api_token": {
+      "type": "string",
+      "title": "FIKEN_API_TOKEN",
+      "description": "Optional. Personal API token (Fiken -> Settings -> API -> Personlige API-nokler). Sent as a Bearer token; never expires; ToS-clean for your own companies. Set this OR run 'auth login' for OAuth2.",
+      "sensitive": true
+    },
+    "fiken_client_id": {
+      "type": "string",
+      "title": "FIKEN_CLIENT_ID",
+      "description": "Optional. OAuth2 client ID, used only by 'auth login' when acting on behalf of other companies. Not needed if you use a personal API token."
+    },
+    "fiken_client_secret": {
+      "type": "string",
+      "title": "FIKEN_CLIENT_SECRET",
+      "description": "Optional. OAuth2 client secret, used only by 'auth login'. Not needed if you use a personal API token.",
+      "sensitive": true
+    },
+    "fiken_no_lock": {
+      "type": "string",
+      "title": "FIKEN_NO_LOCK",
+      "description": "Sets FIKEN_NO_LOCK for the Fiken MCP server. Required by the generated client for credential refresh or hand-written auth flow.",
+      "sensitive": true,
+      "required": true
+    }
+  },
+  "compatibility": {
+    "claude_desktop": ">=1.0.0",
+    "platforms": [
+      "darwin",
+      "linux",
+      "win32"
+    ]
+  }
+}
