@@ -2,9 +2,6 @@
 
 Agent-native Fiken tooling: complete read coverage over a local, searchable mirror — plus the gated, idempotent, audited write and reconciliation layer no other Fiken tool has.
 Reads are a commodity. Every Fiken endpoint is mirrored into local SQLite so an agent can reason over your full accounting history with SQL and full-text search instead of round-tripping a rate-limited API. The read layer is generated and disposable — re-syncable from the API at any time.
-**Agent-native Fiken tooling: complete read coverage over a local, searchable mirror — plus the gated, idempotent, audited write and reconciliation layer no other Fiken tool has.**
-
-Reads are a commodity. Every Fiken endpoint is mirrored into local SQLite so an agent can reason over your full accounting history with SQL and full-text search instead of round-tripping a rate-limited API. The read layer is generated and disposable — re-syncable from the API at any time.
 
 The write path is not disposable. It touches real books, so it's hand-built around a single rule: **an action against the ledger must be impossible to do twice, impossible to do unrecorded, and possible to undo.** Fiken gives you none of those — no idempotency key, no dry-run, no write audit. This CLI adds all three, plus the error-hunting and reconciliation surface that is the whole reason it exists. Every other Fiken tool stops at read-only; none reconcile, none write safely.
 
