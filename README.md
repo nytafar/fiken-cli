@@ -1,19 +1,19 @@
 # Fiken CLI
 
-Agent-native Fiken tooling: complete read coverage over a local, searchable mirror — plus the gated, idempotent, audited write and reconciliation layer no other Fiken tool has.
-Reads are a commodity. Every Fiken endpoint is mirrored into local SQLite so an agent can reason over your full accounting history with SQL and full-text search instead of round-tripping a rate-limited API. The read layer is generated and disposable — re-syncable from the API at any time.
+Agent-native Fiken tooling: broad read coverage over a local, searchable mirror — plus a gated, idempotent, audited posting path and reconciliation helpers.
+The generated read layer exposes the supported Fiken v2 operations through composable commands and syncs supported resources into local SQLite, so an agent can reason over accounting history with SQL and full-text search instead of repeatedly round-tripping a rate-limited API. The mirror is disposable and re-syncable from the API.
 
-The write path is not disposable. It touches real books, so it's hand-built around a single rule: **an action against the ledger must be impossible to do twice, impossible to do unrecorded, and possible to undo.** Fiken gives you none of those — no idempotency key, no dry-run, no write audit. This CLI adds all three, plus the error-hunting and reconciliation surface that is the whole reason it exists. Every other Fiken tool stops at read-only; none reconcile, none write safely.
+The write path is not disposable. It touches real books, so the hand-built posting path is designed around a single rule: **an action against the ledger should be impossible to do twice, difficult to do unrecorded, and possible to undo.** Fiken does not provide all of these safeguards as one operation; this CLI adds them to `commit`, plus error-hunting and reconciliation helpers. The capabilities of other Fiken tools are not assessed here.
 
 ## Two layers
 
 **Reads — generated, disposable.** ~150 Fiken v2 operations as composable, single-purpose commands, plus an MCP server for agents that prefer it. A local SQLite mirror with FTS answers history questions offline, so you don't hammer Fiken's single-concurrent-request limit to find out what a vendor cost last quarter. Delta-synced; rebuildable from the API at will.
 
-**Writes & reconciliation — hand-built, irreplaceable.** Gated, idempotent, date-aligned, and written to an append-only audit log in the same call that makes the change.
+**Writes & reconciliation — hand-built.** `commit` is gated, idempotent, date-aligned, and audited; `reconcile` and `reverse` are separate guarded operations with audit recording.
 
 ## Reconciliation & error-hunting
 
-The surface no Fiken tool has, built around bankavstemming — the most-cited Fiken pain there is — all read-only and answered from the local mirror:
+The CLI includes a bankavstemming-oriented analysis surface, answered from the local mirror:
 
 - **bank-unverified** — ledger-vs-reconciled-balance gaps and postings dated after the reconciled point: *which accounts have drifted and need a session.*
 - **drift** — debit≠credit imbalances and sub-krone øre-rounding drift, exact integer-øre.
@@ -31,17 +31,26 @@ Writing to the ledger is a pipeline, not a call:
 - **validate** — the dry-run Fiken lacks: balanced debit/credit, account exists, MVA code plausible, period open, date sane. Structural checks before anything touches the books.
 - **commit** — idempotent (the same bank line or document never double-books), **date-aligned to the bank line** so the posting rendezvous with the waiting line in Fiken's own reconciliation, stamped with an `X-Request-ID`, and audited in the same call.
 - **reverse** — a correcting entry or soft-delete with audit linkage. Mistakes are correctable, not catastrophic.
-- **reconcile** — payment/settle plus clearing-account entries for payment-processor flows.
+- **reconcile** — registers a payment against a sale or purchase; clearing-account journal workflows are not yet automated.
 
 Plus **mva-summary**, **rollup**, and **vendor-profile** — VAT-return-shaped and margin/revenue/cost views read straight off the mirror. Because Fiken holds the books of record while ecommerce analytics see only a subset of revenue, these report the *whole-business* number, not the storefront's projection of it.
 
 ## Design principles
 
 - **The durable assets are the idempotency map and the append-only audit log — not the mirror.** They live in a separate, backed-up store; the mirror is disposable. Structure compounds; a read cache doesn't.
-- **Idempotent by construction.** Fiken has no idempotency key, so the CLI owns one. Every write checks a durable source→entity map first; a re-run is a no-op, never a duplicate posting.
-- **Audited by construction.** Logging is part of the write call, not a separate step you can forget. Every action records its source, rationale, confidence, the Fiken request id, and its result — so any decision is reconstructable and reversible from your own store. The CLI's own writes and the browser reconciliation harness feed the same single log.
+- **Idempotent where implemented.** `commit` checks a durable source→entity map first; a re-run of the same source is a no-op. Other mutating commands, including `reconcile`, need their own idempotency handling.
+- **Audited where implemented.** Mutating commands attempt to record the request and result in the audit log, but audit persistence is not yet an atomic transaction with the remote Fiken mutation.
 - **Agent-native.** Composable commands, an offline searchable mirror, compact/JSON output, built to be called thousands of times a day and driven from Claude Code.
 - **Reconciliation-first.** The bank-line workflow is the point; everything else serves it.
+
+## Roadmap
+
+The following capabilities are intentionally not represented as current guarantees:
+
+- **Idempotent payments** — add a durable source/payment key and reserve/advance lifecycle to `reconcile`, then cover retries, concurrent invocations, and recovery after an ambiguous Fiken response.
+- **Payment-processor clearing workflows** — add a first-class workflow that validates and posts the clearing-account journal entries around a payout, with dry-run, idempotency, and audit linkage.
+- **Atomic audit guarantees** — define durable outbox/recovery semantics for remote mutations and make audit persistence failure visible and recoverable instead of allowing a successful remote write with no local event.
+- **Verified mirror coverage** — enumerate sync-supported resources against `spec.yaml`, add a coverage report/test, and either implement missing resources or document them as API-only.
 
 ## Install (from source)
 
@@ -163,7 +172,7 @@ fiken-cli drift --company fiken-demo --period 2026-05
 
 ## Unique Features
 
-These capabilities aren't available in any other tool for this API.
+These are the CLI's notable capabilities for this API; comparative coverage of other tools is not claimed.
 
 ### Reconciliation & error hunting
 - **`bank-unverified`** — Lists postings on your bank accounts that aren't yet matched to the bank statement, and shows the exact ledger-vs-reconciled gap per account.
@@ -231,9 +240,9 @@ These capabilities aren't available in any other tool for this API.
   ```bash
   fiken-cli reverse 734083065 --company fiken-demo --dry-run
   ```
-- **`reconcile`** — Registers and settles payments on sales and purchases, including clearing-account journal entries for payment processors.
+- **`reconcile`** — Registers a payment on a sale or purchase. Payment-processor clearing-account journal entries are a roadmap item.
 
-  _Use when a payout or card settlement needs to be matched to an open sale/purchase and booked to the right clearing account._
+  _Use to register a payment against an open sale or purchase; processor clearing-account booking remains a roadmap item._
 
   ```bash
   fiken-cli reconcile --sale 2888156 --amount 34000 --account 1920:10001 --dry-run
