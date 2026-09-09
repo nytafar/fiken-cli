@@ -864,10 +864,13 @@ func (c *Client) refreshAccessToken(ctx context.Context) error {
 	params := url.Values{
 		"grant_type":    {"refresh_token"},
 		"refresh_token": {c.Config.RefreshToken},
-		"client_id":     {c.Config.ClientID},
 	}
-	if c.Config.ClientSecret != "" {
-		params.Set("client_secret", c.Config.ClientSecret)
+	// Fiken authenticates the token endpoint with HTTP Basic, not with body
+	// credentials; see the matching comment in the authorization-code
+	// exchange. Without a secret there is nothing to authenticate with, so
+	// the client only identifies itself.
+	if c.Config.ClientSecret == "" {
+		params.Set("client_id", c.Config.ClientID)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, strings.NewReader(params.Encode()))
@@ -875,6 +878,9 @@ func (c *Client) refreshAccessToken(ctx context.Context) error {
 		return fmt.Errorf("building refresh request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	if c.Config.ClientSecret != "" {
+		req.SetBasicAuth(c.Config.ClientID, c.Config.ClientSecret)
+	}
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("refreshing access token: %w", err)
