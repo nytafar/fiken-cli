@@ -26,3 +26,6 @@ agentcookie-local.toml
 
 # OS
 .DS_Store
+
+# goreleaser
+dist/
