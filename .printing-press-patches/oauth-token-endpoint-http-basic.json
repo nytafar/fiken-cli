@@ -1,0 +1,21 @@
+{
+  "schema_version": 2,
+  "id": "oauth-token-endpoint-http-basic",
+  "applied_at": "2026-09-10",
+  "base_run_id": "20260609-145046",
+  "base_printing_press_version": "4.24.0",
+  "summary": "fix(auth): HTTP Basic client authentication on the Fiken token endpoint, plus state on the code exchange",
+  "reason": "Fiken protects https://fiken.no/oauth/token with HTTP Basic authentication: the client id and secret are the request credentials, not form fields. The generated flow posted client_id/client_secret in the body with no Authorization header, which Fiken rejects, so 'auth login' could never complete and an expired access token could never refresh. Fiken also requires 'state' on the authorization-code exchange; the generated body omitted it. A public client (no secret) still identifies itself with client_id in the body.",
+  "files": [
+    "internal/cli/auth.go",
+    "internal/client/client.go"
+  ],
+  "call_sites": [
+    "req.SetBasicAuth(clientID, clientSecret)",
+    "req.SetBasicAuth(c.Config.ClientID, c.Config.ClientSecret)",
+    "tokenParams.Set(\"client_id\", clientID)",
+    "params.Set(\"client_id\", c.Config.ClientID)",
+    "\"state\":        {state},"
+  ],
+  "validated_outcome": "Verified end to end against a mock token endpoint: both the code exchange and the refresh send Authorization: Basic base64(client_id:client_secret) and carry no credentials in the body. go build ./... and go test ./... pass."
+}

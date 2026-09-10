@@ -51,10 +51,24 @@ func newAuthSetupCmd(_ *rootFlags) *cobra.Command {
 		Example: "  fiken-cli auth setup\n  fiken-cli auth setup --launch",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			w := cmd.OutOrStdout()
-			fmt.Fprintln(w, "Register an app and copy your credentials at: https://fiken.no/")
+			// Fiken hides app registration behind an account-level developer
+			// flag, so a bare link to fiken.no leaves the user hunting. These
+			// are the menu labels from Fiken's own API documentation.
+			fmt.Fprintln(w, "Register a Fiken OAuth app:")
+			fmt.Fprintln(w, "  1. Log in at https://fiken.no/")
+			fmt.Fprintln(w, "  2. Rediger konto -> Profil -> Andre innstillinger: tick the developer box")
+			fmt.Fprintln(w, "  3. Brukerinnstillinger -> API tab -> create an app")
+			fmt.Fprintln(w, "  4. Set the app's redirect URI to: http://localhost:8085/callback")
+			fmt.Fprintln(w, "     (match --port if you pass one to 'fiken-cli auth login')")
+			fmt.Fprintln(w, "  5. Copy the Client ID and Client Secret shown after creation")
+			fmt.Fprintln(w, "")
+			fmt.Fprintln(w, "The API module is a paid add-on; order it under Innstillinger -> Modulaksess.")
+			fmt.Fprintln(w, "A new app is limited to 5 users until api@fiken.no grants production status.")
 			fmt.Fprintln(w, "")
 			fmt.Fprintln(w, "Then run:")
-			fmt.Fprintln(w, "  fiken-cli login")
+			fmt.Fprintln(w, "  export FIKEN_CLIENT_ID=<client id>")
+			fmt.Fprintln(w, "  export FIKEN_CLIENT_SECRET=<client secret>")
+			fmt.Fprintln(w, "  fiken-cli auth login")
 			if !launch {
 				return nil
 			}
@@ -97,6 +111,7 @@ func newAuthLoginCmd(flags *rootFlags) *cobra.Command {
 	var clientID string
 	var clientSecret string
 	var port int
+	var redirectURI string
 
 	cmd := &cobra.Command{
 		Use:   "login",
@@ -105,18 +120,26 @@ func newAuthLoginCmd(flags *rootFlags) *cobra.Command {
 			"mcp:hidden": "true",
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runOAuthLogin(cmd, flags, clientID, clientSecret, port)
+			return runOAuthLogin(cmd, flags, clientID, clientSecret, port, redirectURI)
 		},
 	}
 
 	cmd.Flags().StringVar(&clientID, "client-id", os.Getenv("FIKEN_CLIENT_ID"), "OAuth2 client ID")
 	cmd.Flags().StringVar(&clientSecret, "client-secret", os.Getenv("FIKEN_CLIENT_SECRET"), "OAuth2 client secret")
 	cmd.Flags().IntVar(&port, "port", 8085, "Local callback server port")
+	cmd.Flags().StringVar(&redirectURI, "redirect-uri", os.Getenv("FIKEN_REDIRECT_URI"), "Public callback URL registered with the OAuth app (default http://localhost:<port>/callback)")
 
 	return cmd
 }
 
-func runOAuthLogin(cmd *cobra.Command, flags *rootFlags, clientID, clientSecret string, port int) error {
+// runOAuthLogin binds a loopback callback listener and drives the
+// authorization-code flow. redirectURI overrides the loopback URL that is
+// otherwise derived from the listener: when the browser that authorizes is on
+// a different machine than this process, the callback has to arrive through
+// something both can reach (an SSH tunnel, a Tailscale serve proxy), and that
+// public URL is what the OAuth app is registered with and what Fiken redirects
+// to. The listener stays on loopback either way; the proxy is what bridges.
+func runOAuthLogin(cmd *cobra.Command, flags *rootFlags, clientID, clientSecret string, port int, redirectURI string) error {
 	w := cmd.OutOrStdout()
 	cfg, err := config.Load(flags.configPath)
 	if err != nil {
@@ -155,7 +178,11 @@ func runOAuthLogin(cmd *cobra.Command, flags *rootFlags, clientID, clientSecret 
 	// derived from the configured --port; the live flow below uses the actual
 	// bound port, which the OS assigns when --port 0 is passed.
 	if cliutil.IsVerifyEnv() {
-		params.Set("redirect_uri", fmt.Sprintf("http://localhost:%d/callback", port))
+		shown := redirectURI
+		if shown == "" {
+			shown = fmt.Sprintf("http://localhost:%d/callback", port)
+		}
+		params.Set("redirect_uri", shown)
 		fmt.Fprintf(w, "would launch: %s\n", authURL+"?"+params.Encode())
 		return nil
 	}
@@ -169,7 +196,9 @@ func runOAuthLogin(cmd *cobra.Command, flags *rootFlags, clientID, clientSecret 
 	// Derive the redirect URI from the live listener address so an OS-assigned
 	// ephemeral port (--port 0) is reflected in both the auth request and the
 	// token exchange below.
-	redirectURI := fmt.Sprintf("http://localhost:%d/callback", listener.Addr().(*net.TCPAddr).Port)
+	if redirectURI == "" {
+		redirectURI = fmt.Sprintf("http://localhost:%d/callback", listener.Addr().(*net.TCPAddr).Port)
+	}
 	params.Set("redirect_uri", redirectURI)
 	fullURL := authURL + "?" + params.Encode()
 
@@ -211,8 +240,11 @@ func runOAuthLogin(cmd *cobra.Command, flags *rootFlags, clientID, clientSecret 
 	case code = <-codeCh:
 	case err := <-errCh:
 		return err
-	case <-time.After(2 * time.Minute):
-		return fmt.Errorf("authentication timed out after 2 minutes")
+	// Headless hosts authorize in a browser on another machine, which means
+	// copying the URL out of this terminal and coming back. Two minutes does
+	// not survive that round trip.
+	case <-time.After(10 * time.Minute):
+		return fmt.Errorf("authentication timed out after 10 minutes")
 	}
 
 	server.Shutdown(context.Background())
@@ -226,13 +258,27 @@ func runOAuthLogin(cmd *cobra.Command, flags *rootFlags, clientID, clientSecret 
 		"grant_type":   {"authorization_code"},
 		"code":         {code},
 		"redirect_uri": {redirectURI},
-		"client_id":    {clientID},
+		"state":        {state},
 	}
-	if clientSecret != "" {
-		tokenParams.Set("client_secret", clientSecret)
+	// Fiken protects the token endpoint with HTTP Basic authentication: the
+	// client id and secret are the request credentials, not body parameters,
+	// and posting them in the form yields a 401. A public client has no
+	// secret to authenticate with, so it falls back to identifying itself
+	// in the body.
+	if clientSecret == "" {
+		tokenParams.Set("client_id", clientID)
 	}
 
-	resp, err := http.PostForm(tokenURL, tokenParams)
+	req, err := http.NewRequestWithContext(cmd.Context(), http.MethodPost, tokenURL, strings.NewReader(tokenParams.Encode()))
+	if err != nil {
+		return fmt.Errorf("building token request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	if clientSecret != "" {
+		req.SetBasicAuth(clientID, clientSecret)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("exchanging code for token: %w", err)
 	}

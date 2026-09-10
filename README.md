@@ -76,6 +76,20 @@ fiken-cli auth login             # uses FIKEN_CLIENT_ID / FIKEN_CLIENT_SECRET
 fiken-cli doctor                 # verify auth + connectivity
 ```
 
+`auth login` listens on `127.0.0.1:8085` and, by default, tells Fiken to redirect there.
+On a headless host the browser that authorizes is somewhere else, so point the callback at
+a URL both sides can reach and register that same URL with the OAuth app:
+
+```bash
+# e.g. behind a Tailscale serve proxy in front of the loopback listener
+tailscale serve --bg --https=8443 8085
+fiken-cli auth login --redirect-uri https://<host>.<tailnet>.ts.net:8443/callback
+tailscale serve --https=8443 off     # afterwards
+
+# …or just tunnel the port and keep the localhost default
+ssh -L 8085:localhost:8085 <host>
+```
+
 ## Install the agent skill (Hermes, OpenClaw, other agents)
 
 The skill is just `SKILL.md` in this repo — any agent that reads a skills directory can use it. There's no registry or public-library step; install it straight from your clone:

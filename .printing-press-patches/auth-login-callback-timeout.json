@@ -1,0 +1,17 @@
+{
+  "schema_version": 2,
+  "id": "auth-login-callback-timeout",
+  "applied_at": "2026-09-10",
+  "base_run_id": "20260609-145046",
+  "base_printing_press_version": "4.24.0",
+  "summary": "fix(auth): widen the 'auth login' callback wait from 2 to 10 minutes",
+  "reason": "The generated flow waits 2 minutes for the callback, which assumes a browser on the same machine. On a headless host the URL has to be carried to another device and approved there, and 2 minutes does not survive that round trip.",
+  "files": [
+    "internal/cli/auth.go"
+  ],
+  "call_sites": [
+    "case <-time.After(10 * time.Minute):",
+    "authentication timed out after 10 minutes"
+  ],
+  "validated_outcome": "Timeout and its error string exercised by the login flow's manual dogfood; go build ./... and go test ./... pass."
+}

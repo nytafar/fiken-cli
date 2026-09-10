@@ -1,0 +1,18 @@
+{
+  "schema_version": 2,
+  "id": "auth-login-redirect-uri",
+  "applied_at": "2026-09-10",
+  "base_run_id": "20260609-145046",
+  "base_printing_press_version": "4.24.0",
+  "summary": "feat(auth): 'auth login --redirect-uri' (env FIKEN_REDIRECT_URI) for off-host browsers",
+  "reason": "The generated flow derives the redirect URI from its own loopback listener, so it only works when the authorizing browser runs on the same machine as the CLI. On a headless server reached over SSH there is no such browser and Fiken cannot redirect to the server's localhost. The flag advertises a reachable public callback URL while the listener stays on loopback; an SSH tunnel or a Tailscale serve proxy bridges the two. The URL is used in both the authorize request and the token exchange, which Fiken requires to match, and in the cliutil.IsVerifyEnv() short-circuit. Empty flag falls back to the loopback default.",
+  "files": [
+    "internal/cli/auth.go"
+  ],
+  "call_sites": [
+    "cmd.Flags().StringVar(&redirectURI, \"redirect-uri\", os.Getenv(\"FIKEN_REDIRECT_URI\")",
+    "func runOAuthLogin(cmd *cobra.Command, flags *rootFlags, clientID, clientSecret string, port int, redirectURI string) error {",
+    "\"redirect_uri\": {redirectURI},"
+  ],
+  "validated_outcome": "Verified end to end through 'tailscale serve --https=8443 8085' against a mock authorization server: the callback arrived and the token exchange carried the proxy URL."
+}
