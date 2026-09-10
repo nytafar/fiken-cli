@@ -18,7 +18,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - run: go vet ./... && go test ./...  # switch to make check once 2.0.0 lands
+      - run: make check
       - uses: goreleaser/goreleaser-action@v6
         with:
           version: '~> v2'
