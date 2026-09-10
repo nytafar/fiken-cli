@@ -3,7 +3,10 @@
 // HAND-AUTHORED (NOVEL) — fill-in of the generator's verify-friendly stub
 // (skip-if-exists on regen). Profiles how a single vendor (supplier) is usually
 // posted: the modal expense account and VAT type, purchase count, total gross,
-// last date, and the top-3 (account, vatType) combinations by frequency. Reads
+// last date, and the top-3 (account, vatType) combinations by frequency. The
+// two modals are recency-bounded to the 12 months up to the vendor's latest
+// purchase, so a vendor that changed account or VAT regime reads as it is
+// posted today; the top-3 combos stay whole-window, being descriptive. Reads
 // only the local mirror.
 package cli
 
@@ -15,9 +18,14 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 )
+
+// vendorProfileWindowMonths bounds the modal account/VAT type to the vendor's
+// most recent 12 months of purchases inside the profiled window.
+const vendorProfileWindowMonths = 12
 
 type vendorCombo struct {
 	Account string `json:"account"`
@@ -26,18 +34,19 @@ type vendorCombo struct {
 }
 
 type vendorProfileReport struct {
-	Company          string        `json:"company"`
-	ContactID        int64         `json:"contact_id"`
-	ContactName      string        `json:"contact_name,omitempty"`
-	Window           Window        `json:"window"`
-	UndatedDocuments int           `json:"undated_documents"`
-	PurchaseCount    int           `json:"purchase_count"`
-	TotalOre         int64         `json:"total_ore"`
-	Total            string        `json:"total"`
-	LastDate         string        `json:"last_date,omitempty"`
-	ModalAccount     string        `json:"modal_account,omitempty"`
-	ModalVATType     string        `json:"modal_vat_type,omitempty"`
-	Combos           []vendorCombo `json:"combos"`
+	Company           string        `json:"company"`
+	ContactID         int64         `json:"contact_id"`
+	ContactName       string        `json:"contact_name,omitempty"`
+	Window            Window        `json:"window"`
+	UndatedDocuments  int           `json:"undated_documents"`
+	PurchaseCount     int           `json:"purchase_count"`
+	TotalOre          int64         `json:"total_ore"`
+	Total             string        `json:"total"`
+	LastDate          string        `json:"last_date,omitempty"`
+	ModalAccount      string        `json:"modal_account,omitempty"`
+	ModalVATType      string        `json:"modal_vat_type,omitempty"`
+	ModalWindowMonths int           `json:"modal_window_months"`
+	Combos            []vendorCombo `json:"combos"`
 }
 
 // vendorProfilePurchase is the minimal per-purchase shape the aggregator needs.
@@ -55,10 +64,12 @@ type vendorProfileLine struct {
 // buildVendorProfile is the pure aggregator over a single vendor's purchases.
 // It returns the count, total gross øre, last date, modal account, modal
 // vatType, and the top-3 (account,vatType) combos by frequency (ties broken
-// deterministically by account then vatType).
+// deterministically by account then vatType). The two modals cover only the 12
+// months up to (and including) the vendor's latest purchase — recentModal's
+// window is exclusive of `at`, so `at` is the day after that latest date. The
+// combos remain whole-window frequencies.
 func buildVendorProfile(purchases []vendorProfilePurchase) (count int, totalOre int64, lastDate, modalAccount, modalVAT string, combos []vendorCombo) {
-	acctCounts := map[string]int{}
-	vatCounts := map[string]int{}
+	var acctObs, vatObs []dated
 	comboCounts := map[vendorCombo]int{}
 	count = len(purchases)
 	for _, p := range purchases {
@@ -67,17 +78,16 @@ func buildVendorProfile(purchases []vendorProfilePurchase) (count int, totalOre 
 			lastDate = p.Date
 		}
 		for _, ln := range p.Lines {
-			if ln.Account != "" {
-				acctCounts[ln.Account]++
-			}
-			if ln.VATType != "" {
-				vatCounts[ln.VATType]++
-			}
+			acctObs = append(acctObs, dated{Date: p.Date, Value: ln.Account})
+			vatObs = append(vatObs, dated{Date: p.Date, Value: ln.VATType})
 			comboCounts[vendorCombo{Account: ln.Account, VATType: ln.VATType}]++
 		}
 	}
-	modalAccount = modalKey(acctCounts)
-	modalVAT = modalKey(vatCounts)
+	if at, err := time.Parse("2006-01-02", lastDate); err == nil {
+		day := at.AddDate(0, 0, 1).Format("2006-01-02")
+		modalAccount, _ = recentModal(acctObs, day, vendorProfileWindowMonths)
+		modalVAT, _ = recentModal(vatObs, day, vendorProfileWindowMonths)
+	}
 
 	combos = make([]vendorCombo, 0, len(comboCounts))
 	for c, n := range comboCounts {
@@ -97,19 +107,6 @@ func buildVendorProfile(purchases []vendorProfilePurchase) (count int, totalOre 
 		combos = combos[:3]
 	}
 	return count, totalOre, lastDate, modalAccount, modalVAT, combos
-}
-
-// modalKey returns the most frequent key, ties broken by lexicographically
-// smallest key. Empty map yields "".
-func modalKey(counts map[string]int) string {
-	best := ""
-	bestN := 0
-	for k, n := range counts {
-		if n > bestN || (n == bestN && (best == "" || k < best)) {
-			best, bestN = k, n
-		}
-	}
-	return best
 }
 
 func newNovelVendorProfileCmd(flags *rootFlags) *cobra.Command {
@@ -240,18 +237,19 @@ func newNovelVendorProfileCmd(flags *rootFlags) *cobra.Command {
 
 			count, totalOre, lastDate, modalAccount, modalVAT, combos := buildVendorProfile(mine)
 			report := vendorProfileReport{
-				Company:          slug,
-				ContactID:        contactID,
-				ContactName:      contactName,
-				Window:           win,
-				UndatedDocuments: undated,
-				PurchaseCount:    count,
-				TotalOre:         totalOre,
-				Total:            kr(totalOre),
-				LastDate:         lastDate,
-				ModalAccount:     modalAccount,
-				ModalVATType:     modalVAT,
-				Combos:           combos,
+				Company:           slug,
+				ContactID:         contactID,
+				ContactName:       contactName,
+				Window:            win,
+				UndatedDocuments:  undated,
+				PurchaseCount:     count,
+				TotalOre:          totalOre,
+				Total:             kr(totalOre),
+				LastDate:          lastDate,
+				ModalAccount:      modalAccount,
+				ModalVATType:      modalVAT,
+				ModalWindowMonths: vendorProfileWindowMonths,
+				Combos:            combos,
 			}
 			return emitFiken(cmd, flags, report, func() {
 				w := cmd.OutOrStdout()
