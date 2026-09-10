@@ -491,6 +491,9 @@ func newMCPClient(ctx context.Context) (*client.Client, error) {
 	if tok := fikenTokenFromContext(ctx); tok != "" {
 		cfg.AccessToken = tok
 	}
+	// PATCH(test-company-write-guard): MCP is an agent surface, so it is wired
+	// to test mode unconditionally. See internal/cli/write_guard_setup.go.
+	cli.ConfigureWriteGuardForMCP()
 	c := client.New(cfg, 60*time.Second, defaultMCPRateLimit)
 	// Agents calling through MCP need fresh data every call. The on-disk
 	// response cache survives across MCP server invocations, so a

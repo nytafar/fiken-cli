@@ -529,6 +529,12 @@ func (c *Client) doInternal(ctx context.Context, method, path string, params map
 		return verifyShortCircuitEnvelope(method, path), http.StatusOK, nil
 	}
 	targetURL := c.BaseURL + path
+	// PATCH(test-company-write-guard): ergonomic half of the guard in
+	// write_guard.go; the transport is the durable half. Before any body
+	// encoding, auth minting, dry-run preview or dial.
+	if gerr := guardMutationURL(method, targetURL); gerr != nil {
+		return nil, 0, gerr
+	}
 
 	var bodyBytes []byte
 	var contentType string

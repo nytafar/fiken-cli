@@ -75,6 +75,14 @@ func fikenNewRequestID() string {
 }
 
 func (rt *fikenRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	// Durable half of the test-company write guard (write_guard.go). Below
+	// every client, so anything using http.DefaultTransport is covered —
+	// including refreshAccessToken, which bypasses doInternal. Denials return
+	// (nil, err) rather than a synthetic response so the caller sees the typed
+	// *WriteGuardError instead of an HTTP status it would try to interpret.
+	if err := GuardMutation(req.Method, req.URL); err != nil {
+		return nil, err
+	}
 	if !fikenLockHosts[req.URL.Hostname()] {
 		return rt.base.RoundTrip(req)
 	}

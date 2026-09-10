@@ -1,5 +1,6 @@
 # Secrets / local config — NEVER commit
 .env
+.env.local
 *.env
 config.toml
 agentcookie-local.toml

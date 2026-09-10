@@ -87,6 +87,11 @@ func Execute() error {
 			return derr
 		}
 	}
+	// PATCH(test-company-write-guard): a guard denial gets its own exit code
+	// and, under --json/--agent, a JSON envelope naming the slug and reason.
+	if guardErr := writeGuardCLIError(&flags, err); guardErr != nil {
+		return guardErr
+	}
 	if err != nil && isCobraUsageError(err) {
 		// Cobra/pflag pre-RunE errors (unknown flag, unknown command,
 		// missing required, etc.) never flow through usageErr() because
@@ -317,6 +322,9 @@ func (f *rootFlags) newClient() (*client.Client, error) {
 	if err != nil {
 		return nil, configErr(err)
 	}
+	// PATCH(test-company-write-guard): mode + slug->testCompany resolver, wired
+	// before the first client exists. See internal/cli/write_guard_setup.go.
+	configureWriteGuard(f)
 	c := client.New(cfg, f.timeout, f.rateLimit)
 	c.DryRun = f.dryRun
 	c.NoCache = f.noCache
