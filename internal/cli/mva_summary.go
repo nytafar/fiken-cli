@@ -156,11 +156,22 @@ const mvaCrossCheckToleranceOre = 5
 // computed output VAT disagrees with the 2702/2712 pair Fiken actually posted.
 const mvaKindReverseChargeMismatch = "reverse_charge_journal_mismatch"
 
-// crossCheckReverseCharge compares each purchase bucket in the reverse-charge
-// regime — RegimeBasis, the one that produces equal output and input VAT
-// without ever touching the order line's `vat` field — against the journal.
-// The summary computes that VAT from the basis and the rate; Fiken posts it as
-// a 2702/2712 pair on the purchase's transaction. Those two must agree.
+// isForeignServiceCode reports whether an MVA code is one of the
+// purchase-of-services-from-abroad codes (86 high deductible, 87 high
+// nondeductible, 88 low deductible, 89 low nondeductible), the only ones
+// whose VAT Fiken books on the 2702/2712 pair.
+func isForeignServiceCode(code int) bool {
+	return code >= 86 && code <= 89
+}
+
+// crossCheckReverseCharge compares each purchase bucket for services bought
+// from abroad (MVA codes 86-89, the reverse charge Fiken books on 2702/2712)
+// against the journal. The summary computes that VAT from the basis and the
+// rate; Fiken posts it as a 2702/2712 pair on the purchase's transaction.
+// Those two must agree. Import of goods (codes 21-23) is also a basis regime
+// but its VAT is settled through customs and booked elsewhere, so it is not
+// compared: on a live book every such bucket showed journal 0 against a real
+// computed figure, which is not a mismatch but a different account.
 //
 // A bucket whose purchases have no mirrored transaction at all is not
 // reported: nothing was compared, so there is nothing to disagree about. That
@@ -170,7 +181,7 @@ func crossCheckReverseCharge(lines []mvaLine, buckets []mvaBucket, ix *txIndex) 
 	txByKey := map[mvaKey]map[int64]bool{}
 	for _, ln := range lines {
 		info, known := fikencore.Lookup(ln.VATType)
-		if !known || info.Regime != fikencore.RegimeBasis || ln.TxID == 0 {
+		if !known || !isForeignServiceCode(info.Code) || ln.TxID == 0 {
 			continue
 		}
 		key, _ := mvaBucketKey(ln.VATType, fikencore.SidePurchases)

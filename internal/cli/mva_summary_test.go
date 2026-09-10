@@ -270,3 +270,27 @@ func TestCrossCheckReverseCharge_OnlyBasisRegime(t *testing.T) {
 		t.Errorf("got %+v, want no findings outside the reverse-charge regime", got)
 	}
 }
+
+// Import of goods (codes 21-23) is a basis regime too, but its VAT is not
+// booked on 2702/2712, so it must never be cross-checked against them.
+func TestCrossCheckReverseCharge_SkipsImportBasis(t *testing.T) {
+	lines := []mvaLine{
+		{VATType: "HIGH_BASIS", BasisOre: 100000, VATOre: 0, TxID: 7001},
+		{VATType: "MEDIUM_BASIS", BasisOre: 100000, VATOre: 0, TxID: 7002},
+	}
+	buckets, _, _ := summarizeMVA(lines, fikencore.SidePurchases)
+	ix := buildTxIndex(nil)
+	if got := crossCheckReverseCharge(lines, buckets, ix); len(got) != 0 {
+		t.Fatalf("import-basis buckets must not be cross-checked, got %d findings", len(got))
+	}
+	for _, c := range []int{21, 22, 23, 85, 90} {
+		if isForeignServiceCode(c) {
+			t.Errorf("code %d wrongly treated as foreign service", c)
+		}
+	}
+	for _, c := range []int{86, 87, 88, 89} {
+		if !isForeignServiceCode(c) {
+			t.Errorf("code %d should be foreign service", c)
+		}
+	}
+}
