@@ -467,6 +467,10 @@ func collectCacheReport(ctx context.Context, staleAfterSpec string) map[string]a
 		resources = append(resources, r)
 	}
 	report["resources"] = resources
+	// PATCH(mirror-canonical-resource-name): cross-check sync_state.total_count,
+	// the resources row count and the typed-table row count per resource — the
+	// invariant that would have caught issue #6 on day one.
+	report["mirror_findings"] = mirrorFindingsJSON(mirrorInvariantFindings(s))
 	report["stale_after"] = staleAfter.String()
 
 	switch {
@@ -510,6 +514,8 @@ func renderCacheReport(w io.Writer, rep map[string]any) {
 	if v, ok := rep["oldest_age"]; ok {
 		fmt.Fprintf(w, "    oldest_age: %v\n", v)
 	}
+	// PATCH(mirror-canonical-resource-name): surface the mirror invariant findings.
+	renderMirrorInvariants(w, rep)
 	if resourcesAny, ok := rep["resources"]; ok {
 		if resources, ok := resourcesAny.([]map[string]any); ok && len(resources) > 0 {
 			fmt.Fprintf(w, "    resources:\n")

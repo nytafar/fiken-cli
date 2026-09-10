@@ -147,6 +147,14 @@ Resource scoping:
 				for _, resource := range resources {
 					_ = db.SaveSyncState(resource, "", 0)
 				}
+				// PATCH(mirror-canonical-resource-name): make --full actually full
+				// for the scoped company. Resetting the cursor alone leaves every
+				// existing row in place, so a run whose storage key changed (the
+				// canonicalisation fix) re-adds the same records under the correct
+				// key and the company is then counted twice by loadCompanyResources.
+				// Only ever runs with an explicit --company, one named resource at a
+				// time; an unscoped --full keeps the printed behaviour.
+				clearFullSyncCompanyRows(db, resources)
 			}
 
 			if cliutil.IsDogfoodEnv() && !cmd.Flags().Changed("max-pages") {
@@ -353,6 +361,10 @@ Resource scoping:
 		},
 	}
 
+	// PATCH(mirror-canonical-resource-name): the printed sync walks every row of the
+	// `companies` table, so an unscoped run fetches every book in the mirror. Only
+	// agensia is a Fiken testCompany; the rest are live.
+	cmd.Flags().StringVar(&syncCompanyScope, "company", "", "Restrict parent-keyed (dependent) syncs to this company slug (default: every company in the mirror)")
 	cmd.Flags().StringSliceVar(&resources, "resources", nil, "Comma-separated resource types to sync. Naming a parent also runs its parent-keyed dependents (see Long help for scoping).")
 	cmd.Flags().BoolVar(&full, "full", false, "Full resync (ignore previous checkpoint)")
 	cmd.Flags().StringVar(&since, "since", "", "Incremental sync duration (e.g. 7d, 24h, 1w, 30m)")
@@ -729,7 +741,9 @@ func syncResource(ctx context.Context, c interface {
 	if capExitHit {
 		finalCursor = capExitCursor
 	}
-	_ = db.SaveSyncState(resource, finalCursor, totalCount)
+	// PATCH(mirror-canonical-resource-name): persist the real row count, not this
+	// run's running counter (issue #6 §3).
+	_ = db.SaveSyncState(resource, finalCursor, syncStateTotalCount(db, resource, totalCount))
 
 	// F4b symptom probe: if items were consumed and successfully
 	// extracted (extractFailures < consumed) but nothing landed in
@@ -1403,6 +1417,17 @@ func upsertSingleObject(db *store.Store, resource string, data json.RawMessage) 
 
 	resource = resolveDiscriminatedResource(resource, obj)
 
+	// PATCH(mirror-canonical-resource-name): one spelling before anything keys on
+	// the name — the dispatch below, extractID's override map and the resource_type
+	// column. The printed switch spelled bank-accounts/journal-entries with a
+	// hyphen while the sync registry spells them with an underscore, so those two
+	// resources never reached their typed table (issue #6 §1).
+	canonicalResource, cerr := store.CanonicalResource(resource)
+	if cerr != nil {
+		return cerr
+	}
+	resource = canonicalResource
+
 	id := extractID(resource, obj)
 	if id == "" {
 		id = resource
@@ -1411,7 +1436,7 @@ func upsertSingleObject(db *store.Store, resource string, data json.RawMessage) 
 	switch resource {
 	case "accounts":
 		return db.UpsertAccounts(data)
-	case "bank-accounts":
+	case "bank_accounts":
 		return db.UpsertBankAccounts(data)
 	case "contacts":
 		return db.UpsertContacts(data)
@@ -1423,7 +1448,7 @@ func upsertSingleObject(db *store.Store, resource string, data json.RawMessage) 
 		return db.UpsertInbox(data)
 	case "invoices_attachments":
 		return db.UpsertInvoicesAttachments(data)
-	case "journal-entries":
+	case "journal_entries":
 		return db.UpsertJournalEntries(data)
 	case "journal_entries_attachments":
 		return db.UpsertJournalEntriesAttachments(data)
@@ -1458,6 +1483,12 @@ func upsertSingleObject(db *store.Store, resource string, data json.RawMessage) 
 	case "transactions_delete":
 		return db.UpsertTransactionsDelete(data)
 	default:
+		// PATCH(mirror-canonical-resource-name): a canonical name that owns a typed
+		// table must have matched an arm above; reaching the generic write means the
+		// switch is out of step with internal/store/resource_name.go (issue #6).
+		if store.HasTypedTable(resource) {
+			return fmt.Errorf("upsertSingleObject: %q has a typed table but reached the generic default arm", resource)
+		}
 		return db.Upsert(resource, id, data)
 	}
 }
@@ -1619,6 +1650,8 @@ func syncDependentResource(ctx context.Context, c interface {
 		pathParams = []dependentPathParamDef{{Param: dep.ParentIDParam, Field: field}}
 	}
 	parentRows, err := dependentParentRows(db, dep.ParentTable, pathParams)
+	// PATCH(mirror-canonical-resource-name): honour --company.
+	parentRows = scopeParentRowsToCompany(dep.ParentTable, parentRows)
 	if err != nil || len(parentRows) == 0 {
 		if len(parentRows) == 0 {
 			if humanFriendly {
@@ -1861,7 +1894,8 @@ func syncDependentResource(ctx context.Context, c interface {
 		fmt.Fprintf(os.Stderr, "\n")
 	}
 
-	_ = db.SaveSyncState(dep.Name, "", totalCount)
+	// PATCH(mirror-canonical-resource-name): persist the real row count (issue #6 §3).
+	_ = db.SaveSyncState(dep.Name, "", syncStateTotalCount(db, dep.Name, totalCount))
 
 	// F4b symptom probe: items consumed and extracted but nothing landed.
 	// See syncResource for rationale.

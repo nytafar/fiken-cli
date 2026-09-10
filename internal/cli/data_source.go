@@ -132,6 +132,19 @@ func resolveReadWithStrategy(ctx context.Context, c *client.Client, flags *rootF
 	if err := validateDataSourceStrategy(flags, strategy); err != nil {
 		return nil, DataProvenance{}, err
 	}
+	// PATCH(mirror-canonical-resource-name): one spelling for the mirror. The
+	// generated read commands pass the kebab CLI name ("bank-accounts") while sync
+	// writes the snake registry name ("bank_accounts"), so the read path's
+	// write-through rows and the sync rows were two disjoint populations of the
+	// same resource (issue #6 §2). Canonicalising here fixes the local read, the
+	// sync-state lookup and the write-through in one place. companySlug feeds the
+	// parent_id the write-through rows were missing.
+	canonicalResource, cerr := store.CanonicalResource(resourceType)
+	if cerr != nil {
+		return nil, DataProvenance{}, cerr
+	}
+	resourceType = canonicalResource
+	companySlug := mirrorCompanySlugFromPath(path)
 	if strategy == "local" {
 		data, prov, err := resolveLocal(ctx, flags, hintWriter, resourceType, isList, path, params, "strategy_local")
 		return data, attachFreshness(prov, flags), err
@@ -158,7 +171,7 @@ func resolveReadWithStrategy(ctx context.Context, c *client.Client, flags *rootF
 	default: // "auto"
 		data, err := c.GetWithHeaders(ctx, path, params, headers)
 		if err == nil {
-			writeThroughCache(ctx, resourceType, data)
+			writeThroughCache(ctx, resourceType, companySlug, data)
 			return data, attachFreshness(DataProvenance{Source: "live"}, flags), nil
 		}
 		if !isNetworkError(err) {
@@ -186,6 +199,19 @@ func resolvePaginatedReadWithStrategy(ctx context.Context, c *client.Client, fla
 	if err := validateDataSourceStrategy(flags, strategy); err != nil {
 		return nil, DataProvenance{}, err
 	}
+	// PATCH(mirror-canonical-resource-name): one spelling for the mirror. The
+	// generated read commands pass the kebab CLI name ("bank-accounts") while sync
+	// writes the snake registry name ("bank_accounts"), so the read path's
+	// write-through rows and the sync rows were two disjoint populations of the
+	// same resource (issue #6 §2). Canonicalising here fixes the local read, the
+	// sync-state lookup and the write-through in one place. companySlug feeds the
+	// parent_id the write-through rows were missing.
+	canonicalResource, cerr := store.CanonicalResource(resourceType)
+	if cerr != nil {
+		return nil, DataProvenance{}, cerr
+	}
+	resourceType = canonicalResource
+	companySlug := mirrorCompanySlugFromPath(path)
 	if strategy == "local" {
 		data, prov, err := resolveLocal(ctx, flags, hintWriter, resourceType, true, path, params, "strategy_local")
 		return data, attachFreshness(prov, flags), err
@@ -212,7 +238,7 @@ func resolvePaginatedReadWithStrategy(ctx context.Context, c *client.Client, fla
 	default: // "auto"
 		data, err := paginatedGet(ctx, c, path, params, headers, fetchAll, cursorParam, paginationType, limitParam, nextCursorPath, hasMoreField)
 		if err == nil {
-			writeThroughCache(ctx, resourceType, data)
+			writeThroughCache(ctx, resourceType, companySlug, data)
 			return data, attachFreshness(DataProvenance{Source: "live"}, flags), nil
 		}
 		if !isNetworkError(err) {
@@ -271,7 +297,10 @@ var writeThroughNestedEnvelopeKeys = []string{"data", "Data", "result", "Result"
 // writeThroughCache upserts live API results into the local SQLite store so
 // FTS search covers everything the user has looked up — not just explicit syncs.
 // Best-effort: failures are silently ignored (the live result already succeeded).
-func writeThroughCache(ctx context.Context, resourceType string, data json.RawMessage) {
+// PATCH(mirror-canonical-resource-name): companySlug added. resourceType is
+// already canonical at every call site; companySlug is the /companies/{slug}/…
+// owner, stamped onto each item so loadCompanyResources can see the row.
+func writeThroughCache(ctx context.Context, resourceType string, companySlug string, data json.RawMessage) {
 	db, err := store.OpenWithContext(ctx, defaultDBPath("fiken-cli"))
 	if err != nil {
 		return
@@ -334,7 +363,7 @@ func writeThroughCache(ctx context.Context, resourceType string, data json.RawMe
 					}
 				}
 				if !looksLikeListEnvelope {
-					_, _, _ = db.UpsertBatch(resourceType, []json.RawMessage{data})
+					_, _, _ = db.UpsertBatch(resourceType, mirrorWithParentID([]json.RawMessage{data}, companySlug))
 					return
 				}
 			}
@@ -342,7 +371,7 @@ func writeThroughCache(ctx context.Context, resourceType string, data json.RawMe
 	}
 
 	if len(items) > 0 {
-		_, _, _ = db.UpsertBatch(resourceType, items)
+		_, _, _ = db.UpsertBatch(resourceType, mirrorWithParentID(items, companySlug))
 	}
 }
 
@@ -442,6 +471,19 @@ func isRawJSONNull(raw json.RawMessage) bool {
 }
 
 func writeMutationResponseToStore(ctx context.Context, resourceType string, data json.RawMessage, responsePath string) {
+	// PATCH(mirror-canonical-resource-name): the ~70 generated mutation commands
+	// pass the kebab CLI name; canonicalise once here so the id-override lookup in
+	// ExtractResourceID and the typed-table dispatch in UpsertBatch both hit. An
+	// unknown name is a codegen bug — drop the row rather than mint a third
+	// spelling in `resources`. (No parent_id is stamped here: this function is not
+	// given the request path, and the company slug lives nowhere else in scope.)
+	canonicalResource, cerr := store.CanonicalResource(resourceType)
+	if cerr != nil {
+		fmt.Fprintf(os.Stderr, "warning: not caching %s mutation response: %v\n", resourceType, cerr)
+		return
+	}
+	resourceType = canonicalResource
+
 	items := mutationResponseEntityItems(resourceType, data, responsePath)
 	if len(items) == 0 {
 		return
