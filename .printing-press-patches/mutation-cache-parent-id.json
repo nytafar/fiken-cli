@@ -1,0 +1,32 @@
+{
+  "schema_version": 2,
+  "id": "mutation-cache-parent-id",
+  "applied_at": "2026-09-10",
+  "base_run_id": "20260609-145046",
+  "base_printing_press_version": "4.24.0",
+  "summary": "fix(mirror): stamp parent_id on cached mutation responses by threading the request path into writeMutationResponseToStore",
+  "reason": "Follow-up to mirror-canonical-resource-name (Copilot review of PR #9, internal/cli/data_source.go:479). That patch canonicalised the resource name in writeMutationResponseToStore but left the upsert unstamped, because the function was not given the request path. For a parent-keyed resource (purchases, sales, journal_entries, bank_accounts, ... every entry in resourceParentKeyColumns whose parent column is parent_id) resourceStorageID then fell back to a BARE id, which reintroduces both halves of the original bug for rows written by a mutation: (a) loadCompanyResources filters on $.parent_id, so a cached mutation row was invisible to every detector and rollup, and (b) two companies' entities carrying the same API id collided on the resources primary key (resource_type, id) and the later write destroyed the earlier one. The fix mirrors writeThroughCache exactly: the generated mutation commands already hold the substituted API path in their local `path` variable, so it is passed as a fifth argument and writeMutationResponseToStore calls mirrorWithParentID(items, mirrorCompanySlugFromPath(requestPath)) before UpsertBatch. The generated-file edit is one argument plus a two-line PATCH comment at each of the 67 mutation call sites; no other generated logic changes. A path that carries no company slug (/companies, /user, an unsubstituted {companySlug} template) yields an empty slug and mirrorWithParentID passes the items through untouched, so account-level resources keep the bare id that is their correct storage key.",
+  "files": [
+    "internal/cli/data_source.go",
+    "internal/cli/mirror_canonical.go",
+    "internal/cli/mirror_canonical_test.go",
+    "internal/cli/purchases_add-attachment-to-draft.go",
+    "internal/cli/sales_add-attachment-to-draft.go",
+    "internal/cli/bank-accounts_create.go",
+    "internal/cli/promoted_general-journal-entries.go",
+    "internal/cli/transactions_delete_transaction.go"
+  ],
+  "call_sites": [
+    "PATCH(mutation-cache-parent-id)",
+    "func writeMutationResponseToStore(ctx context.Context, resourceType string, data json.RawMessage, responsePath string, requestPath string) {",
+    "mirrorWithParentID(items, mirrorCompanySlugFromPath(requestPath))",
+    "writeMutationResponseToStore(cmd.Context(), \"purchases\", data, \"\", path)",
+    "writeMutationResponseToStore(cmd.Context(), \"sales\", data, \"\", path)",
+    "writeMutationResponseToStore(cmd.Context(), \"bank-accounts\", data, \"\", path)",
+    "writeMutationResponseToStore(cmd.Context(), \"general-journal-entries\", data, \"\", path)",
+    "writeMutationResponseToStore(cmd.Context(), \"delete\", data, \"entries\", path)",
+    "func TestGeneratedMutationCallSitesPassRequestPath(t *testing.T) {"
+  ],
+  "validated_outcome": "go build ./..., go vet ./... and go test -count=1 ./... pass. New hand-authored tests in internal/cli/mirror_canonical_test.go: TestWriteMutationResponseToStore_StampsParentIDFromRequestPath (a simulated purchase mutation response for two different company slugs produces the two storage keys 4242\\0agensia and 4242\\0other-co instead of one bare 4242 row, and loadCompanyResources(agensia) sees exactly the agensia row), TestWriteMutationResponseToStore_NoSlugKeepsBareKey (a /companies mutation keeps the bare slug key), and TestGeneratedMutationCallSitesPassRequestPath, which scans every generated file in internal/cli and fails if any writeMutationResponseToStore call site does not pass the `path` variable -- that scan, not the representative needles in call_sites[], is what makes a reprint fail closed across all 67 sites. No API call was made; the tests write to a temporary HOME.",
+  "patch_count": 68
+}

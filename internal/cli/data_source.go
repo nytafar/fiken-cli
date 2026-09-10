@@ -470,13 +470,26 @@ func isRawJSONNull(raw json.RawMessage) bool {
 	return strings.TrimSpace(string(raw)) == "null"
 }
 
-func writeMutationResponseToStore(ctx context.Context, resourceType string, data json.RawMessage, responsePath string) {
+// writeMutationResponseToStore caches a successful mutation response in the
+// local mirror. requestPath is the API path the mutation was sent to; it is the
+// only place the owning company slug appears, so it has to be threaded in from
+// the generated call site.
+//
+// PATCH(mutation-cache-parent-id): stamp parent_id from the request path before
+// upserting, mirroring writeThroughCache. Without it a cached mutation row for a
+// parent-keyed resource (purchases/sales/journal_entries/bank_accounts) got a
+// BARE resourceStorageID: invisible to loadCompanyResources, which filters on
+// $.parent_id, and colliding with another company's row carrying the same API
+// id. A path with no company slug (/companies, /user, an unsubstituted
+// {companySlug} template) yields an empty slug and mirrorWithParentID passes the
+// items through untouched — those resources are not parent-keyed, so the bare id
+// is the correct storage key for them.
+func writeMutationResponseToStore(ctx context.Context, resourceType string, data json.RawMessage, responsePath string, requestPath string) {
 	// PATCH(mirror-canonical-resource-name): the ~70 generated mutation commands
 	// pass the kebab CLI name; canonicalise once here so the id-override lookup in
 	// ExtractResourceID and the typed-table dispatch in UpsertBatch both hit. An
 	// unknown name is a codegen bug — drop the row rather than mint a third
-	// spelling in `resources`. (No parent_id is stamped here: this function is not
-	// given the request path, and the company slug lives nowhere else in scope.)
+	// spelling in `resources`.
 	canonicalResource, cerr := store.CanonicalResource(resourceType)
 	if cerr != nil {
 		fmt.Fprintf(os.Stderr, "warning: not caching %s mutation response: %v\n", resourceType, cerr)
@@ -495,7 +508,7 @@ func writeMutationResponseToStore(ctx context.Context, resourceType string, data
 	}
 	defer db.Close()
 
-	_, _, _ = db.UpsertBatch(resourceType, items)
+	_, _, _ = db.UpsertBatch(resourceType, mirrorWithParentID(items, mirrorCompanySlugFromPath(requestPath)))
 }
 
 func mutationResponseEntityItems(resourceType string, data json.RawMessage, responsePath string) []json.RawMessage {

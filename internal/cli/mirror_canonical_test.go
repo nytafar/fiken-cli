@@ -4,9 +4,11 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -169,5 +171,136 @@ func TestCanonicalResource_AcceptsEveryGeneratedCallSiteName(t *testing.T) {
 		if !store.IsKnownResource(canonical) {
 			t.Errorf("generated call site passes %q (canonical %q), which is not in the closed set", n, canonical)
 		}
+	}
+}
+
+// A cached mutation response has to be keyed and filtered exactly like a synced
+// row: parent_id stamped from the request path, storage key id\0slug. Before
+// PATCH(mutation-cache-parent-id) the mutation cache wrote a BARE id, so the row
+// was invisible to loadCompanyResources (which filters on $.parent_id) and two
+// companies' purchases with the same purchaseId overwrote each other.
+func TestWriteMutationResponseToStore_StampsParentIDFromRequestPath(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	ctx := context.Background()
+
+	writeMutationResponseToStore(ctx,
+		"purchases",
+		json.RawMessage(`{"purchaseId": 4242, "kind": "supplier", "date": "2026-01-15"}`),
+		"",
+		"/companies/agensia/purchases")
+	// same API id, a different book: must not collide on the primary key
+	writeMutationResponseToStore(ctx,
+		"purchases",
+		json.RawMessage(`{"purchaseId": 4242, "kind": "supplier", "date": "2026-02-20"}`),
+		"",
+		"/companies/other-co/purchases")
+
+	db, err := store.OpenWithContext(ctx, defaultDBPath("fiken-cli"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	ids := resourceStorageIDs(t, db, "purchases")
+	want := []string{"4242" + string([]byte{0}) + "agensia", "4242" + string([]byte{0}) + "other-co"}
+	if !reflect.DeepEqual(ids, want) {
+		t.Errorf("storage keys = %q, want %q", ids, want)
+	}
+
+	rows, err := loadCompanyResources(ctx, db, "purchases", "agensia")
+	if err != nil {
+		t.Fatalf("loadCompanyResources: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("loadCompanyResources(agensia) = %d rows, want 1", len(rows))
+	}
+	if got := string(rows[0]["date"]); got != `"2026-01-15"` {
+		t.Errorf("agensia row date = %s, want the agensia mutation", got)
+	}
+}
+
+// A mutation whose path carries no company slug (the company record itself, an
+// account-level endpoint) keeps the bare id: those resources are not
+// parent-keyed, so a bare key is the correct one and stamping a parent would
+// invent an owner.
+func TestWriteMutationResponseToStore_NoSlugKeepsBareKey(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	ctx := context.Background()
+
+	writeMutationResponseToStore(ctx,
+		"companies",
+		json.RawMessage(`{"slug": "agensia", "name": "Agensia AS"}`),
+		"",
+		"/companies")
+
+	db, err := store.OpenWithContext(ctx, defaultDBPath("fiken-cli"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	ids := resourceStorageIDs(t, db, "companies")
+	if !reflect.DeepEqual(ids, []string{"agensia"}) {
+		t.Errorf("storage keys = %q, want [agensia] (bare, no parent)", ids)
+	}
+}
+
+func resourceStorageIDs(t *testing.T, db *store.Store, resourceType string) []string {
+	t.Helper()
+	rows, err := db.DB().Query(`SELECT id FROM resources WHERE resource_type = ? ORDER BY id`, resourceType)
+	if err != nil {
+		t.Fatalf("query %s: %v", resourceType, err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		out = append(out, id)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows: %v", err)
+	}
+	return out
+}
+
+// Regen guard: every generated mutation command must hand the request path to
+// writeMutationResponseToStore. A reprint that drops the argument would not
+// compile, but one that reintroduces the four-argument call with a literal ""
+// would compile and silently go back to bare keys.
+func TestGeneratedMutationCallSitesPassRequestPath(t *testing.T) {
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	call := regexp.MustCompile(`writeMutationResponseToStore\(cmd\.Context\(\), "[A-Za-z0-9_-]+", data, "[A-Za-z0-9_-]*", ([A-Za-z]+)\)`)
+	any := regexp.MustCompile(`writeMutationResponseToStore\(cmd\.Context\(\)`)
+	sites := 0
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		b, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		body := string(b)
+		total := len(any.FindAllString(body, -1))
+		threaded := call.FindAllStringSubmatch(body, -1)
+		if total != len(threaded) {
+			t.Errorf("%s: %d mutation cache call(s), %d pass the request path", name, total, len(threaded))
+		}
+		for _, m := range threaded {
+			if m[1] != "path" {
+				t.Errorf("%s: mutation cache call passes %q, want the request path variable", name, m[1])
+			}
+		}
+		sites += len(threaded)
+	}
+	if sites < 50 {
+		t.Fatalf("scanned only %d mutation call sites; the scan is broken", sites)
 	}
 }
