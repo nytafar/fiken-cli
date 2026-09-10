@@ -3,61 +3,37 @@
 // HAND-AUTHORED (NOVEL) — fill-in of the generator's verify-friendly stub
 // (skip-if-exists on regen). The #1 feature (build-spec brief workflow #1):
 // surface postings on bank accounts that aren't yet matched to the bank
-// statement. For each bank account it reports Fiken's own reconciliation
-// anchor (reconciledBalance / reconciledDate) plus every journal posting on
-// that account code dated AFTER reconciledDate — the set blocking a clean
-// bankavstemming. Reads only the local mirror.
+// statement. Each unreconciled posting on a bank account code — dated AFTER
+// that account's reconciledDate — is one Finding; the per-account
+// reconciliation anchors (reconciledBalance / reconciledDate) travel in the
+// report's Params. Unlike the period detectors this one is anchored to the
+// ledger's own reconciled date, not a calendar period, so it takes --as-of
+// rather than --period. Reads only the local mirror.
 package cli
 
 // pp:data-source local
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
 )
 
-type unverifiedPosting struct {
-	Date          string `json:"date"`
-	Description   string `json:"description"`
-	AmountOre     int64  `json:"amount_ore"`
-	Amount        string `json:"amount"`
-	JournalEntry  int64  `json:"journal_entry_id,omitempty"`
-	TransactionID int64  `json:"transaction_id,omitempty"`
-}
-
-type bankUnverifiedAccount struct {
-	AccountCode      string              `json:"account_code"`
-	Name             string              `json:"name"`
-	ReconciledDate   string              `json:"reconciled_date,omitempty"`
-	ReconciledBalOre int64               `json:"reconciled_balance_ore"`
-	ReconciledBal    string              `json:"reconciled_balance"`
-	UnverifiedCount  int                 `json:"unverified_count"`
-	UnverifiedSumOre int64               `json:"unverified_sum_ore"`
-	UnverifiedSum    string              `json:"unverified_sum"`
-	Postings         []unverifiedPosting `json:"postings"`
-}
-
-type bankUnverifiedReport struct {
-	Company         string                  `json:"company"`
-	AsOf            string                  `json:"as_of,omitempty"`
-	TotalUnverified int                     `json:"total_unverified_postings"`
-	Accounts        []bankUnverifiedAccount `json:"accounts"`
-}
-
 func newNovelBankUnverifiedCmd(flags *rootFlags) *cobra.Command {
 	var flagCompany string
 	var flagAsOf string
 	var dbPath string
+	var opts reportOpts
 
 	cmd := &cobra.Command{
 		Use:   "bank-unverified",
 		Short: "List bank-account postings not yet matched to the bank statement",
-		Long: "Reports, per bank account, the ledger-reconciliation anchor (reconciledBalance/reconciledDate)\n" +
-			"and every journal posting on that account dated after it — the postings blocking a clean\n" +
-			"bankavstemming. Reads the local mirror; run 'sync' first.",
+		Long: "Reports every journal posting on a bank account dated after that account's ledger\n" +
+			"reconciliation anchor (reconciledBalance/reconciledDate) — the postings blocking a clean\n" +
+			"bankavstemming. The anchors themselves are in the report's params. The window here is the\n" +
+			"account's own reconciled date, so this command takes --as-of, not --period. Reads the local\n" +
+			"mirror; run 'sync' first.",
 		Example: strings.Trim(`
   fiken-cli bank-unverified --company fiken-demo
   fiken-cli bank-unverified --company fiken-demo --as-of 2026-05-31 --agent`, "\n"),
@@ -103,7 +79,8 @@ func newNovelBankUnverifiedCmd(flags *rootFlags) *cobra.Command {
 				order = append(order, code)
 			}
 
-			postingsByCode := map[string][]unverifiedPosting{}
+			var findings []Finding
+			undated := 0
 			entries, err := loadCompanyResources(cmd.Context(), db, "journal_entries", slug)
 			if err != nil {
 				return err
@@ -111,6 +88,7 @@ func newNovelBankUnverifiedCmd(flags *rootFlags) *cobra.Command {
 			for _, e := range entries {
 				date := jsonStr(e, "date")
 				if date == "" {
+					undated++
 					continue
 				}
 				if flagAsOf != "" && date > flagAsOf {
@@ -131,67 +109,67 @@ func newNovelBankUnverifiedCmd(flags *rootFlags) *cobra.Command {
 						continue
 					}
 					amt, _ := jsonInt(ln, "amount")
-					postingsByCode[code] = append(postingsByCode[code], unverifiedPosting{
-						Date:          date,
-						Description:   desc,
-						AmountOre:     amt,
-						Amount:        kr(amt),
-						JournalEntry:  jeID,
-						TransactionID: txID,
+					detail := map[string]any{}
+					if txID != 0 {
+						detail["transaction_id"] = txID
+					}
+					if meta.name != "" {
+						detail["account_name"] = meta.name
+					}
+					if meta.reconciledDate != "" {
+						detail["reconciled_date"] = meta.reconciledDate
+					}
+					findings = append(findings, Finding{
+						Kind:        "unverified_posting",
+						Severity:    SeverityInfo,
+						DocType:     "journal_entry",
+						DocID:       jeID,
+						Date:        date,
+						Description: desc,
+						Account:     code,
+						ImpactOre:   amt,
+						Detail:      detail,
 					})
 				}
 			}
 
-			report := bankUnverifiedReport{Company: slug, AsOf: flagAsOf}
+			// The window is the ledger's reconciliation anchor, not a period:
+			// --as-of only caps it from above.
+			win := Window{Source: "all"}
+			if flagAsOf != "" {
+				win = Window{To: flagAsOf, Source: "flag"}
+			}
+			accounts := make([]map[string]any, 0, len(order))
 			for _, code := range order {
 				meta := byCode[code]
-				ps := postingsByCode[code]
-				sort.Slice(ps, func(i, j int) bool { return ps[i].Date < ps[j].Date })
-				var sum int64
-				for _, p := range ps {
-					sum += p.AmountOre
-				}
-				report.Accounts = append(report.Accounts, bankUnverifiedAccount{
-					AccountCode:      code,
-					Name:             meta.name,
-					ReconciledDate:   meta.reconciledDate,
-					ReconciledBalOre: meta.reconciledBal,
-					ReconciledBal:    kr(meta.reconciledBal),
-					UnverifiedCount:  len(ps),
-					UnverifiedSumOre: sum,
-					UnverifiedSum:    kr(sum),
-					Postings:         ps,
+				accounts = append(accounts, map[string]any{
+					"account":                code,
+					"name":                   meta.name,
+					"reconciled_date":        meta.reconciledDate,
+					"reconciled_balance_ore": meta.reconciledBal,
 				})
-				report.TotalUnverified += len(ps)
 			}
-
-			return emitFiken(cmd, flags, report, func() {
-				w := cmd.OutOrStdout()
-				fmt.Fprintf(w, "Bank reconciliation status for %s", report.Company)
-				if report.AsOf != "" {
-					fmt.Fprintf(w, " (as of %s)", report.AsOf)
-				}
-				fmt.Fprintf(w, "\n\n")
-				if len(report.Accounts) == 0 {
-					fmt.Fprintln(w, "No bank accounts in the mirror — run 'fiken-cli sync' first.")
-					return
-				}
-				for _, a := range report.Accounts {
-					fmt.Fprintf(w, "%s  %s\n", a.AccountCode, a.Name)
-					fmt.Fprintf(w, "  reconciled: %s kr through %s\n", a.ReconciledBal, orNone(a.ReconciledDate))
-					fmt.Fprintf(w, "  unverified: %d posting(s), %s kr\n", a.UnverifiedCount, a.UnverifiedSum)
-					for _, p := range a.Postings {
-						fmt.Fprintf(w, "    %s  %12s  %s\n", p.Date, p.Amount, p.Description)
-					}
-					fmt.Fprintln(w)
-				}
-				fmt.Fprintf(w, "Total unverified postings: %d\n", report.TotalUnverified)
-			})
+			report := Report{
+				Company:  slug,
+				Detector: "bank_unverified",
+				Window:   win,
+				Undated:  undated,
+				Params:   map[string]any{"accounts": accounts},
+			}
+			keyFn := func(f Finding) map[string]string {
+				return map[string]string{"account": f.Account}
+			}
+			return finishReport(cmd, flags, report, findings, keyFn, opts)
 		},
 	}
 	cmd.Flags().StringVar(&flagCompany, "company", "", "Company slug (default: the single synced company)")
 	cmd.Flags().StringVar(&flagAsOf, "as-of", "", "Only consider postings up to this date (YYYY-MM-DD)")
 	cmd.Flags().StringVar(&dbPath, "db", "", "Mirror database path (default: ~/.local/share/fiken-cli/data.db)")
+	// Deliberately not addReportFlags: --period would imply a calendar window
+	// this detector does not have. The two size flags are registered with the
+	// same names, defaults and help text so they mean one thing everywhere.
+	cmd.Flags().Int64Var(&opts.minImpactOre, "min-impact-ore", 0, "Drop findings whose absolute impact is below this many øre")
+	cmd.Flags().IntVar(&opts.limit, "limit", 200, "Max findings to emit; the summary and total still cover all of them")
 	return cmd
 }
 

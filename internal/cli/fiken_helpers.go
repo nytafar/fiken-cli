@@ -206,6 +206,34 @@ func kr(ore int64) string {
 	return s
 }
 
+// nowFunc is the clock the period resolver reads. A package-level var so
+// tests can pin "now" and assert the default-year behaviour deterministically.
+var nowFunc = time.Now
+
+// resolvePeriod turns the --period flag into a resolved Window, and is the one
+// place that decides what an unset --period means. The tool serves the open
+// year, so unset is the current calendar year rather than all history; "all"
+// (any case) opts back out to unbounded. Everything else goes to parsePeriod.
+func resolvePeriod(flag string) (Window, error) {
+	s := strings.TrimSpace(flag)
+	if s == "" {
+		y := nowFunc().Year()
+		return Window{
+			From:   fmt.Sprintf("%04d-01-01", y),
+			To:     fmt.Sprintf("%04d-12-31", y),
+			Source: "default_current_year",
+		}, nil
+	}
+	if strings.EqualFold(s, "all") {
+		return Window{Source: "all"}, nil
+	}
+	from, to, err := parsePeriod(s)
+	if err != nil {
+		return Window{}, err
+	}
+	return Window{From: from, To: to, Source: "flag"}, nil
+}
+
 // parsePeriod turns a period token into an inclusive [from,to] YYYY-MM-DD
 // range. Supported: "2026", "2026-05", "2026-Q1".."2026-Q4", and explicit
 // "from:to". Empty input returns empty bounds (no filter).

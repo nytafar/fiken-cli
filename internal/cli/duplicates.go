@@ -4,7 +4,8 @@
 // (skip-if-exists on regen). Surfaces suspected double-postings: within
 // purchases (and, separately, sales), documents that share the same counterpart
 // contact AND the same gross øre amount AND fall within a date window of each
-// other are grouped as a suspected duplicate. Reads only the local mirror.
+// other are grouped as a suspected duplicate. Emits the shared Report envelope,
+// one Finding per suspected-duplicate group. Reads only the local mirror.
 package cli
 
 // pp:data-source local
@@ -31,16 +32,7 @@ type duplicateGroup struct {
 	ContactID   int64          `json:"contact_id,omitempty"`
 	ContactName string         `json:"contact_name,omitempty"`
 	AmountOre   int64          `json:"amount_ore"`
-	Amount      string         `json:"amount"`
 	Docs        []duplicateDoc `json:"docs"`
-}
-
-type duplicatesReport struct {
-	Company     string           `json:"company"`
-	Period      string           `json:"period,omitempty"`
-	WindowDays  int              `json:"window_days"`
-	TotalGroups int              `json:"total_groups"`
-	Groups      []duplicateGroup `json:"groups"`
 }
 
 // dupCandidate is the minimal shape the detector needs.
@@ -94,7 +86,6 @@ func findDuplicateGroups(cands []dupCandidate, windowDays int) []duplicateGroup 
 					ContactID:   k.contactID,
 					ContactName: run[0].ContactName,
 					AmountOre:   k.gross,
-					Amount:      kr(k.gross),
 					Docs:        docs,
 				})
 			}
@@ -131,6 +122,41 @@ func findDuplicateGroups(cands []dupCandidate, windowDays int) []duplicateGroup 
 	return groups
 }
 
+// duplicateFindings adapts the pure detector's groups into the shared Finding
+// envelope: one finding per group, identified by its earliest document, with
+// the shared gross amount as the impact — the money at stake if the document
+// really was booked twice. Pure, so a test can cover the mapping.
+func duplicateFindings(groups []duplicateGroup) []Finding {
+	findings := make([]Finding, 0, len(groups))
+	for _, g := range groups {
+		if len(g.Docs) == 0 {
+			continue
+		}
+		ids := make([]int64, 0, len(g.Docs))
+		dates := make([]string, 0, len(g.Docs))
+		for _, d := range g.Docs {
+			ids = append(ids, d.DocID)
+			dates = append(dates, d.Date)
+		}
+		findings = append(findings, Finding{
+			Kind:        "duplicate_group",
+			Severity:    SeverityWarning,
+			DocType:     g.DocType,
+			DocID:       g.Docs[0].DocID,
+			Date:        g.Docs[0].Date,
+			ContactID:   g.ContactID,
+			ContactName: g.ContactName,
+			ImpactOre:   g.AmountOre,
+			Detail: map[string]any{
+				"doc_ids":    ids,
+				"dates":      dates,
+				"group_size": len(g.Docs),
+			},
+		})
+	}
+	return findings
+}
+
 func absDays(a, b time.Time) int {
 	d := int(a.Sub(b).Hours() / 24)
 	if d < 0 {
@@ -141,9 +167,9 @@ func absDays(a, b time.Time) int {
 
 func newNovelDuplicatesCmd(flags *rootFlags) *cobra.Command {
 	var flagCompany string
-	var flagPeriod string
 	var dbPath string
 	var windowDays int
+	var opts reportOpts
 
 	cmd := &cobra.Command{
 		Use:   "duplicates",
@@ -156,7 +182,7 @@ func newNovelDuplicatesCmd(flags *rootFlags) *cobra.Command {
   fiken-cli duplicates --company fiken-demo --window-days 3 --period 2026 --agent`, "\n"),
 		Annotations: map[string]string{"mcp:read-only": "true"},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			from, to, err := parsePeriod(flagPeriod)
+			win, err := resolvePeriod(opts.period)
 			if err != nil {
 				return err
 			}
@@ -176,18 +202,6 @@ func newNovelDuplicatesCmd(flags *rootFlags) *cobra.Command {
 				return err
 			}
 
-			inPeriod := func(date string) bool {
-				if date == "" {
-					return false
-				}
-				if from != "" && date < from {
-					return false
-				}
-				if to != "" && date > to {
-					return false
-				}
-				return true
-			}
 			// The gross a line contributes depends on its VAT regime (net+vat
 			// only for ordinary domestic VAT), so the regime authority answers
 			// it — otherwise a reverse-charge purchase and an ordinary one of a
@@ -204,24 +218,27 @@ func newNovelDuplicatesCmd(flags *rootFlags) *cobra.Command {
 				return g
 			}
 			contactOf := func(m map[string]json.RawMessage, key string) (int64, string) {
-				if raw, ok := m[key]; ok {
-					var ent map[string]json.RawMessage
-					if json.Unmarshal(raw, &ent) == nil {
-						id, _ := jsonInt(ent, "contactId")
-						return id, jsonStr(ent, "name")
-					}
+				ent := jsonObject(m, key)
+				if ent == nil {
+					return 0, ""
 				}
-				return 0, ""
+				id, _ := jsonInt(ent, "contactId")
+				return id, jsonStr(ent, "name")
 			}
 
 			var cands []dupCandidate
+			undated := 0
 			purchases, err := loadCompanyResources(cmd.Context(), db, "purchases", slug)
 			if err != nil {
 				return err
 			}
 			for _, p := range purchases {
 				date := jsonStr(p, "date")
-				if !inPeriod(date) {
+				if date == "" {
+					undated++
+					continue
+				}
+				if !win.Contains(date) {
 					continue
 				}
 				id, _ := jsonInt(p, "purchaseId")
@@ -237,7 +254,11 @@ func newNovelDuplicatesCmd(flags *rootFlags) *cobra.Command {
 			}
 			for _, s := range sales {
 				date := jsonStr(s, "date")
-				if !inPeriod(date) {
+				if date == "" {
+					undated++
+					continue
+				}
+				if !win.Contains(date) {
 					continue
 				}
 				id, _ := jsonInt(s, "saleId")
@@ -250,34 +271,23 @@ func newNovelDuplicatesCmd(flags *rootFlags) *cobra.Command {
 				})
 			}
 
-			groups := findDuplicateGroups(cands, windowDays)
-			report := duplicatesReport{
-				Company:     slug,
-				Period:      flagPeriod,
-				WindowDays:  windowDays,
-				TotalGroups: len(groups),
-				Groups:      groups,
+			report := Report{
+				Company:  slug,
+				Detector: "duplicates",
+				Window:   win,
+				Undated:  undated,
+				Params:   map[string]any{"window_days": windowDays},
 			}
-			return emitFiken(cmd, flags, report, func() {
-				w := cmd.OutOrStdout()
-				fmt.Fprintf(w, "Suspected duplicates for %s (window %d days)\n\n", report.Company, report.WindowDays)
-				if len(report.Groups) == 0 {
-					fmt.Fprintln(w, "No suspected duplicates found.")
-					return
-				}
-				for _, g := range report.Groups {
-					fmt.Fprintf(w, "%s  %s  %s kr\n", g.DocType, orNone(g.ContactName), g.Amount)
-					for _, d := range g.Docs {
-						fmt.Fprintf(w, "    #%d  %s\n", d.DocID, d.Date)
-					}
-				}
-				fmt.Fprintf(w, "\nTotal suspected-duplicate groups: %d\n", report.TotalGroups)
-			})
+			keyFn := func(f Finding) map[string]string {
+				return map[string]string{"doc_type": f.DocType}
+			}
+			groups := findDuplicateGroups(cands, windowDays)
+			return finishReport(cmd, flags, report, duplicateFindings(groups), keyFn, opts)
 		},
 	}
 	cmd.Flags().StringVar(&flagCompany, "company", "", "Company slug (default: the single synced company)")
-	cmd.Flags().StringVar(&flagPeriod, "period", "", "Period to scan: YYYY, YYYY-MM, YYYY-Qn, or from:to (default: all)")
 	cmd.Flags().StringVar(&dbPath, "db", "", "Mirror database path (default: ~/.local/share/fiken-cli/data.db)")
 	cmd.Flags().IntVar(&windowDays, "window-days", 5, "Max days apart for two documents to count as a duplicate pair")
+	addReportFlags(cmd, &opts)
 	return cmd
 }

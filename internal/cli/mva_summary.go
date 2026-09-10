@@ -37,16 +37,17 @@ type mvaBucket struct {
 }
 
 type mvaSummaryReport struct {
-	Company        string      `json:"company"`
-	Period         string      `json:"period,omitempty"`
-	Output         []mvaBucket `json:"output"`
-	Input          []mvaBucket `json:"input"`
-	TotalOutputOre int64       `json:"total_output_vat_ore"`
-	TotalOutput    string      `json:"total_output_vat"`
-	TotalInputOre  int64       `json:"total_input_vat_ore"`
-	TotalInput     string      `json:"total_input_vat"`
-	NetVATOre      int64       `json:"net_vat_ore"`
-	NetVAT         string      `json:"net_vat"`
+	Company          string      `json:"company"`
+	Window           Window      `json:"window"`
+	UndatedDocuments int         `json:"undated_documents"`
+	Output           []mvaBucket `json:"output"`
+	Input            []mvaBucket `json:"input"`
+	TotalOutputOre   int64       `json:"total_output_vat_ore"`
+	TotalOutput      string      `json:"total_output_vat"`
+	TotalInputOre    int64       `json:"total_input_vat_ore"`
+	TotalInput       string      `json:"total_input_vat"`
+	NetVATOre        int64       `json:"net_vat_ore"`
+	NetVAT           string      `json:"net_vat"`
 }
 
 // mvaLine is the minimal per-line shape the summarizer needs.
@@ -127,13 +128,14 @@ func newNovelMvaSummaryCmd(flags *rootFlags) *cobra.Command {
 			"output VAT and input VAT its vatType's regime implies (a reverse-charge purchase\n" +
 			"carries both sides; a basis line's VAT is computed, not read off the line), and\n" +
 			"reports the net VAT position (total output − total input).\n" +
-			"Pass --period to scope to a term; empty summarizes everything. Reads the local mirror.",
+			"--period scopes to a term and defaults to the current year; pass `all` to summarize\n" +
+			"everything. Reads the local mirror.",
 		Example: strings.Trim(`
   fiken-cli mva-summary --company fiken-demo --period 2026-Q1
   fiken-cli mva-summary --company fiken-demo --agent`, "\n"),
 		Annotations: map[string]string{"mcp:read-only": "true"},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			from, to, err := parsePeriod(flagPeriod)
+			win, err := resolvePeriod(flagPeriod)
 			if err != nil {
 				return err
 			}
@@ -150,25 +152,18 @@ func newNovelMvaSummaryCmd(flags *rootFlags) *cobra.Command {
 				return err
 			}
 
-			inPeriod := func(date string) bool {
-				if from == "" && to == "" {
-					return true
-				}
-				if date == "" {
-					return false
-				}
-				if from != "" && date < from {
-					return false
-				}
-				if to != "" && date > to {
-					return false
-				}
-				return true
-			}
+			// A document with no date cannot be placed in any window, so it is
+			// excluded always and counted instead of silently vanishing.
+			undated := 0
 			collect := func(docs []map[string]json.RawMessage) []mvaLine {
 				var out []mvaLine
 				for _, d := range docs {
-					if !inPeriod(jsonStr(d, "date")) {
+					date := jsonStr(d, "date")
+					if date == "" {
+						undated++
+						continue
+					}
+					if !win.Contains(date) {
 						continue
 					}
 					for _, ln := range jsonObjects(d, "lines") {
@@ -201,22 +196,25 @@ func newNovelMvaSummaryCmd(flags *rootFlags) *cobra.Command {
 			totalIn := salesIn + purchIn
 			net := totalOut - totalIn
 			report := mvaSummaryReport{
-				Company:        slug,
-				Period:         flagPeriod,
-				Output:         salesBuckets,
-				Input:          purchBuckets,
-				TotalOutputOre: totalOut,
-				TotalOutput:    kr(totalOut),
-				TotalInputOre:  totalIn,
-				TotalInput:     kr(totalIn),
-				NetVATOre:      net,
-				NetVAT:         kr(net),
+				Company:          slug,
+				Window:           win,
+				UndatedDocuments: undated,
+				Output:           salesBuckets,
+				Input:            purchBuckets,
+				TotalOutputOre:   totalOut,
+				TotalOutput:      kr(totalOut),
+				TotalInputOre:    totalIn,
+				TotalInput:       kr(totalIn),
+				NetVATOre:        net,
+				NetVAT:           kr(net),
 			}
 			return emitFiken(cmd, flags, report, func() {
 				w := cmd.OutOrStdout()
-				fmt.Fprintf(w, "MVA summary for %s", report.Company)
-				if report.Period != "" {
-					fmt.Fprintf(w, " (%s)", report.Period)
+				fmt.Fprintf(w, "MVA summary for %s (%s)\n", report.Company, report.Window.String())
+				fmt.Fprintf(w, "Output VAT %s kr, input VAT %s kr — net (output − input) %s kr",
+					report.TotalOutput, report.TotalInput, report.NetVAT)
+				if report.UndatedDocuments > 0 {
+					fmt.Fprintf(w, ", %d undated document(s) skipped", report.UndatedDocuments)
 				}
 				fmt.Fprintf(w, "\n\n")
 				printBuckets := func(title string, bs []mvaBucket) {
@@ -235,14 +233,13 @@ func newNovelMvaSummaryCmd(flags *rootFlags) *cobra.Command {
 					}
 				}
 				printBuckets("Sales lines", report.Output)
+				fmt.Fprintln(w)
 				printBuckets("Purchase lines", report.Input)
-				fmt.Fprintf(w, "\nOutput VAT %s kr, input VAT %s kr\n", report.TotalOutput, report.TotalInput)
-				fmt.Fprintf(w, "Net VAT (output − input): %s kr\n", report.NetVAT)
 			})
 		},
 	}
 	cmd.Flags().StringVar(&flagCompany, "company", "", "Company slug (default: the single synced company)")
-	cmd.Flags().StringVar(&flagPeriod, "period", "", "VAT term to summarize: YYYY, YYYY-MM, YYYY-Qn, or from:to (default: all)")
+	cmd.Flags().StringVar(&flagPeriod, "period", "", "Period: YYYY, YYYY-MM, YYYY-Qn, from:to, or all (default: current year)")
 	cmd.Flags().StringVar(&dbPath, "db", "", "Mirror database path (default: ~/.local/share/fiken-cli/data.db)")
 	return cmd
 }

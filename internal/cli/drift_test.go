@@ -202,3 +202,76 @@ func TestDriftScan(t *testing.T) {
 		})
 	}
 }
+
+// TestDriftSeverity pins the grading rule: a regime breach is an error (the
+// MVA return is wrong), a rate/total difference only a warning.
+func TestDriftSeverity(t *testing.T) {
+	tests := []struct {
+		kind string
+		want Severity
+	}{
+		{"total_mismatch", SeverityWarning},
+		{"vat_rate", SeverityWarning},
+		{"basis_has_vat", SeverityError},
+		{"direct_has_net", SeverityError},
+		{"nondeductible_embedded_vat", SeverityError},
+		{"zero_rated_has_vat", SeverityError},
+		{"unknown_vat_type", SeverityError},
+	}
+	for _, tt := range tests {
+		t.Run(tt.kind, func(t *testing.T) {
+			if got := driftSeverity(tt.kind); got != tt.want {
+				t.Errorf("driftSeverity(%q) = %q, want %q", tt.kind, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestDriftScanFindingFields checks that the scanned document's contact and
+// description reach the Finding, that the impact is the signed difference, and
+// that expected/actual survive in Detail as raw øre.
+func TestDriftScanFindingFields(t *testing.T) {
+	docs := []driftScanDoc{{
+		DocType: "purchase", DocID: 7, Date: "2026-02-01",
+		ContactID: 42, ContactName: "Acme AS", Description: "INV-1",
+		Lines: []driftScanLine{{
+			Account: "4000:1", VATType: "HIGH", Description: "Widgets",
+			NetPrice: 10000, VAT: 1000,
+		}},
+	}}
+	got := driftScan(docs, 1)
+	if len(got) != 1 {
+		t.Fatalf("got %d findings, want 1", len(got))
+	}
+	f := got[0]
+	if f.ContactID != 42 || f.ContactName != "Acme AS" {
+		t.Errorf("contact = (%d, %q), want (42, \"Acme AS\")", f.ContactID, f.ContactName)
+	}
+	if f.Description != "Widgets" {
+		t.Errorf("Description = %q, want the line description %q", f.Description, "Widgets")
+	}
+	// expected vat 2500, actual 1000 -> impact -1500.
+	if f.ImpactOre != -1500 {
+		t.Errorf("ImpactOre = %d, want -1500", f.ImpactOre)
+	}
+	if f.Detail["expected_ore"] != int64(2500) || f.Detail["actual_ore"] != int64(1000) {
+		t.Errorf("Detail = %+v, want expected_ore 2500 / actual_ore 1000", f.Detail)
+	}
+	if note, _ := f.Detail["note"].(string); note == "" {
+		t.Error("Detail[note] is empty, want an explanation")
+	}
+}
+
+// TestDriftScanFallsBackToDocumentDescription: a header mismatch has no line,
+// so the document's own description identifies it.
+func TestDriftScanFallsBackToDocumentDescription(t *testing.T) {
+	docs := []driftScanDoc{{
+		DocType: "sale", DocID: 2, Date: "2026-01-11", Description: "XK455L", HasHeader: true,
+		NetAmount: 10000, VATAmount: 2513,
+		Lines: []driftScanLine{{Account: "3000:1", VATType: "HIGH", NetPrice: 10050, VAT: 2513}},
+	}}
+	got := driftScan(docs, 1)
+	if len(got) != 1 || got[0].Description != "XK455L" {
+		t.Fatalf("got %+v, want one finding described as XK455L", got)
+	}
+}

@@ -34,11 +34,31 @@ type rollupRow struct {
 }
 
 type rollupReport struct {
-	Company string      `json:"company"`
-	By      string      `json:"by"`
-	Metric  string      `json:"metric"`
-	Period  string      `json:"period,omitempty"`
-	Rows    []rollupRow `json:"rows"`
+	Company string `json:"company"`
+	By      string `json:"by"`
+	Metric  string `json:"metric"`
+	Window  Window `json:"window"`
+	// Totals are the whole (post-window) set, so the text view can lead with
+	// the answer instead of making the reader add the rows up.
+	TotalSalesOre     int64       `json:"total_sales_ore"`
+	TotalSales        string      `json:"total_sales"`
+	TotalPurchasesOre int64       `json:"total_purchases_ore"`
+	TotalPurchases    string      `json:"total_purchases"`
+	TotalMarginOre    int64       `json:"total_margin_ore"`
+	TotalMargin       string      `json:"total_margin"`
+	UndatedDocuments  int         `json:"undated_documents"`
+	Rows              []rollupRow `json:"rows"`
+}
+
+// rollupTotals sums the rows into the report-level totals. Margin is derived
+// from the summed sides rather than by summing per-row margins so it stays
+// consistent with them even if a row is ever added without one. Pure.
+func rollupTotals(rows []rollupRow) (salesOre, purchasesOre, marginOre int64) {
+	for _, r := range rows {
+		salesOre += r.SalesOre
+		purchasesOre += r.PurchasesOre
+	}
+	return salesOre, purchasesOre, salesOre - purchasesOre
 }
 
 // rollupContribution is one (key,label,sales,purchases) contribution emitted by
@@ -103,13 +123,14 @@ func newNovelRollupCmd(flags *rootFlags) *cobra.Command {
 		Short: "Group sales/purchases/margin by month, account, or contact",
 		Long: "Groups sales and purchases over a period by the chosen dimension and reports the chosen\n" +
 			"metric per group. --by: month (date[:7]) | account (line account) | contact (counterpart).\n" +
-			"--metric: sales | purchases | margin (= sales − purchases). Reads the local mirror.",
+			"--metric: sales | purchases | margin (= sales − purchases). --period defaults to the\n" +
+			"current year; pass `all` to roll up everything. Reads the local mirror.",
 		Example: strings.Trim(`
   fiken-cli rollup --company fiken-demo --by month --metric margin --period 2026
   fiken-cli rollup --company fiken-demo --by account --metric purchases --agent`, "\n"),
 		Annotations: map[string]string{"mcp:read-only": "true"},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			from, to, err := parsePeriod(flagPeriod)
+			win, err := resolvePeriod(flagPeriod)
 			if err != nil {
 				return err
 			}
@@ -142,21 +163,9 @@ func newNovelRollupCmd(flags *rootFlags) *cobra.Command {
 				return err
 			}
 
-			inPeriod := func(date string) bool {
-				if from == "" && to == "" {
-					return true
-				}
-				if date == "" {
-					return false
-				}
-				if from != "" && date < from {
-					return false
-				}
-				if to != "" && date > to {
-					return false
-				}
-				return true
-			}
+			// A document with no date cannot be placed in any window, so it is
+			// excluded always and counted instead of silently vanishing.
+			undated := 0
 			contactOf := func(m map[string]json.RawMessage, key string) (string, string) {
 				if raw, ok := m[key]; ok {
 					var ent map[string]json.RawMessage
@@ -179,7 +188,11 @@ func newNovelRollupCmd(flags *rootFlags) *cobra.Command {
 				}
 				for _, s := range sales {
 					date := jsonStr(s, "date")
-					if !inPeriod(date) {
+					if date == "" {
+						undated++
+						continue
+					}
+					if !win.Contains(date) {
 						continue
 					}
 					switch by {
@@ -210,7 +223,11 @@ func newNovelRollupCmd(flags *rootFlags) *cobra.Command {
 				}
 				for _, p := range purchases {
 					date := jsonStr(p, "date")
-					if !inPeriod(date) {
+					if date == "" {
+						undated++
+						continue
+					}
+					if !win.Contains(date) {
 						continue
 					}
 					switch by {
@@ -231,18 +248,29 @@ func newNovelRollupCmd(flags *rootFlags) *cobra.Command {
 				}
 			}
 
+			rows := aggregateRollup(contribs)
+			totalSales, totalPurch, totalMargin := rollupTotals(rows)
 			report := rollupReport{
-				Company: slug,
-				By:      by,
-				Metric:  metric,
-				Period:  flagPeriod,
-				Rows:    aggregateRollup(contribs),
+				Company:           slug,
+				By:                by,
+				Metric:            metric,
+				Window:            win,
+				TotalSalesOre:     totalSales,
+				TotalSales:        kr(totalSales),
+				TotalPurchasesOre: totalPurch,
+				TotalPurchases:    kr(totalPurch),
+				TotalMarginOre:    totalMargin,
+				TotalMargin:       kr(totalMargin),
+				UndatedDocuments:  undated,
+				Rows:              rows,
 			}
 			return emitFiken(cmd, flags, report, func() {
 				w := cmd.OutOrStdout()
-				fmt.Fprintf(w, "Rollup of %s by %s for %s", report.Metric, report.By, report.Company)
-				if report.Period != "" {
-					fmt.Fprintf(w, " (%s)", report.Period)
+				fmt.Fprintf(w, "Rollup of %s by %s for %s (%s)\n", report.Metric, report.By, report.Company, report.Window.String())
+				fmt.Fprintf(w, "sales %s kr, purchases %s kr, margin %s kr — %d group(s)",
+					report.TotalSales, report.TotalPurchases, report.TotalMargin, len(report.Rows))
+				if report.UndatedDocuments > 0 {
+					fmt.Fprintf(w, ", %d undated document(s) skipped", report.UndatedDocuments)
 				}
 				fmt.Fprintf(w, "\n\n")
 				if len(report.Rows) == 0 {
@@ -269,7 +297,7 @@ func newNovelRollupCmd(flags *rootFlags) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&flagCompany, "company", "", "Company slug (default: the single synced company)")
-	cmd.Flags().StringVar(&flagPeriod, "period", "", "Period to roll up: YYYY, YYYY-MM, YYYY-Qn, or from:to (default: all)")
+	cmd.Flags().StringVar(&flagPeriod, "period", "", "Period: YYYY, YYYY-MM, YYYY-Qn, from:to, or all (default: current year)")
 	cmd.Flags().StringVar(&flagBy, "by", "month", "Grouping dimension: month|account|contact")
 	cmd.Flags().StringVar(&flagMetric, "metric", "margin", "Metric to report: sales|purchases|margin")
 	cmd.Flags().StringVar(&dbPath, "db", "", "Mirror database path (default: ~/.local/share/fiken-cli/data.db)")

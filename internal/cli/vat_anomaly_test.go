@@ -34,11 +34,19 @@ func TestVatAnomalyScan(t *testing.T) {
 		// HIGH_DIRECT is valid only for purchases.
 		lines := []vatAnomalyLine{{
 			DocType: "sale", Side: fikencore.SideSales, DocID: 1, Date: "2026-01-01",
-			Account: "3000:1", VATType: "HIGH_DIRECT", InPeriod: true,
+			Account: "3000:1", VATType: "HIGH_DIRECT", Description: "Konsulenttime", VATOre: 2500, InPeriod: true,
 		}}
 		got := vatAnomalyScan(lines, 3)
-		if len(got) != 1 || got[0].Reason != "invalid_for_side" {
+		if len(got) != 1 || got[0].Kind != "invalid_for_side" {
 			t.Fatalf("got %+v; want one invalid_for_side", got)
+		}
+		if got[0].Severity != SeverityError {
+			t.Errorf("severity = %q; want error (the MVA return is wrong)", got[0].Severity)
+		}
+		// The line's own VAT is the money at stake, and the line description
+		// travels with the finding.
+		if got[0].ImpactOre != 2500 || got[0].Description != "Konsulenttime" {
+			t.Errorf("finding = %+v; want impact 2500 and the line description", got[0])
 		}
 	})
 
@@ -70,11 +78,14 @@ func TestVatAnomalyScan(t *testing.T) {
 		if len(got) != 1 {
 			t.Fatalf("got %d findings %+v; want 1", len(got), got)
 		}
-		if got[0].Reason != "deviates_from_vendor_pattern" {
-			t.Errorf("reason = %q; want deviates_from_vendor_pattern", got[0].Reason)
+		if got[0].Kind != "deviates_from_vendor_pattern" {
+			t.Errorf("kind = %q; want deviates_from_vendor_pattern", got[0].Kind)
 		}
-		if got[0].ExpectedVATType != "HIGH" {
-			t.Errorf("expected modal = %q; want HIGH", got[0].ExpectedVATType)
+		if got[0].Severity != SeverityWarning {
+			t.Errorf("severity = %q; want warning", got[0].Severity)
+		}
+		if got[0].Detail["expected_vat_type"] != "HIGH" {
+			t.Errorf("expected modal = %v; want HIGH", got[0].Detail["expected_vat_type"])
 		}
 	})
 

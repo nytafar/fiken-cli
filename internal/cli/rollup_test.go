@@ -102,3 +102,35 @@ func TestPurchaseGross_RegimeAware(t *testing.T) {
 		})
 	}
 }
+
+func TestRollupTotals(t *testing.T) {
+	tests := []struct {
+		name                     string
+		rows                     []rollupRow
+		sales, purchases, margin int64
+	}{
+		{name: "empty"},
+		{
+			name:      "sums both sides and derives margin",
+			rows:      []rollupRow{{SalesOre: 10000, PurchasesOre: 4000}, {SalesOre: 2500, PurchasesOre: 500}},
+			sales:     12500,
+			purchases: 4500,
+			margin:    8000,
+		},
+		{
+			name:      "negative margin",
+			rows:      []rollupRow{{SalesOre: 1000, PurchasesOre: 9000}},
+			sales:     1000,
+			purchases: 9000,
+			margin:    -8000,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s, p, m := rollupTotals(tt.rows)
+			if s != tt.sales || p != tt.purchases || m != tt.margin {
+				t.Fatalf("got (%d, %d, %d), want (%d, %d, %d)", s, p, m, tt.sales, tt.purchases, tt.margin)
+			}
+		})
+	}
+}

@@ -5,15 +5,14 @@
 // implausible for the side (a purchase-only type on a sale, or vice versa)
 // or that deviates from the modal VAT type the business usually applies to
 // that (contact, account) pair. The pattern check needs >=3 samples for a
-// (contact, account) group before any deviation is reported. Reads only the
-// local mirror.
+// (contact, account) group before any deviation is reported. Emits the shared
+// Report envelope. Reads only the local mirror.
 package cli
 
 // pp:data-source local
 
 import (
 	"encoding/json"
-	"fmt"
 	"sort"
 	"strings"
 
@@ -22,24 +21,13 @@ import (
 	"github.com/spf13/cobra"
 )
 
-type vatAnomalyFinding struct {
-	DocType         string `json:"doc_type"`
-	DocID           int64  `json:"doc_id"`
-	Date            string `json:"date"`
-	ContactID       int64  `json:"contact_id,omitempty"`
-	ContactName     string `json:"contact_name,omitempty"`
-	Account         string `json:"account"`
-	VATType         string `json:"vat_type"`
-	Reason          string `json:"reason"` // invalid_for_side | deviates_from_vendor_pattern
-	ExpectedVATType string `json:"expected_vat_type,omitempty"`
-}
-
-type vatAnomalyReport struct {
-	Company       string              `json:"company"`
-	Period        string              `json:"period,omitempty"`
-	TotalFindings int                 `json:"total_findings"`
-	Findings      []vatAnomalyFinding `json:"findings"`
-}
+const (
+	vatAnomalyInvalidForSide = "invalid_for_side"
+	vatAnomalyDeviates       = "deviates_from_vendor_pattern"
+	// vatAnomalyMinSamples is how many lines a (contact, account) pair needs
+	// before its modal VAT type is treated as a pattern worth deviating from.
+	vatAnomalyMinSamples = 3
+)
 
 // vatAnomalyLine is the minimal per-line shape the detector needs.
 type vatAnomalyLine struct {
@@ -49,9 +37,11 @@ type vatAnomalyLine struct {
 	Date        string
 	ContactID   int64
 	ContactName string
+	Description string
 	Account     string
 	VATType     string
-	InPeriod    bool // whether this line falls in the reported window
+	VATOre      int64 // the line's own VAT — the money a mis-typed line puts at stake
+	InPeriod    bool  // whether this line falls in the reported window
 }
 
 // modalVATType returns the most frequent value in counts, breaking ties
@@ -68,11 +58,39 @@ func modalVATType(counts map[string]int) (string, int) {
 	return best, bestN
 }
 
+// vatAnomalyFindingOf builds the shared Finding for one flagged line. A VAT
+// type that is invalid for the document's side is an error (the MVA return is
+// wrong); a deviation from the vendor's usual pattern is a warning (it may
+// simply be an unusual but correct line).
+func vatAnomalyFindingOf(ln vatAnomalyLine, kind, expected string) Finding {
+	sev := SeverityWarning
+	if kind == vatAnomalyInvalidForSide {
+		sev = SeverityError
+	}
+	f := Finding{
+		Kind:        kind,
+		Severity:    sev,
+		DocType:     ln.DocType,
+		DocID:       ln.DocID,
+		Date:        ln.Date,
+		ContactID:   ln.ContactID,
+		ContactName: ln.ContactName,
+		Description: ln.Description,
+		Account:     ln.Account,
+		VATType:     ln.VATType,
+		ImpactOre:   ln.VATOre,
+	}
+	if expected != "" {
+		f.Detail = map[string]any{"expected_vat_type": expected}
+	}
+	return f
+}
+
 // vatAnomalyScan is the pure detector. It considers the full history (for
 // building per-(contact,account) modal patterns) but only emits findings for
 // lines whose InPeriod is true. minSamples is the group size threshold for the
 // deviation check (the brief specifies 3).
-func vatAnomalyScan(lines []vatAnomalyLine, minSamples int) []vatAnomalyFinding {
+func vatAnomalyScan(lines []vatAnomalyLine, minSamples int) []Finding {
 	// Build modal vatType per (contact, account) over ALL history.
 	type key struct {
 		contact int64
@@ -90,23 +108,14 @@ func vatAnomalyScan(lines []vatAnomalyLine, minSamples int) []vatAnomalyFinding 
 		groups[k][ln.VATType]++
 	}
 
-	var findings []vatAnomalyFinding
+	var findings []Finding
 	for _, ln := range lines {
 		if !ln.InPeriod || ln.VATType == "" {
 			continue
 		}
 		// Check 1: invalid for the document's side.
 		if !fikencore.VATTypeValidFor(ln.VATType, ln.Side) {
-			findings = append(findings, vatAnomalyFinding{
-				DocType:     ln.DocType,
-				DocID:       ln.DocID,
-				Date:        ln.Date,
-				ContactID:   ln.ContactID,
-				ContactName: ln.ContactName,
-				Account:     ln.Account,
-				VATType:     ln.VATType,
-				Reason:      "invalid_for_side",
-			})
+			findings = append(findings, vatAnomalyFindingOf(ln, vatAnomalyInvalidForSide, ""))
 			continue // an invalid type is reported once; don't also pattern-flag it
 		}
 		// Check 2: deviation from the modal type for this (contact, account).
@@ -121,17 +130,7 @@ func vatAnomalyScan(lines []vatAnomalyLine, minSamples int) []vatAnomalyFinding 
 		}
 		modal, _ := modalVATType(counts)
 		if modal != "" && ln.VATType != modal {
-			findings = append(findings, vatAnomalyFinding{
-				DocType:         ln.DocType,
-				DocID:           ln.DocID,
-				Date:            ln.Date,
-				ContactID:       ln.ContactID,
-				ContactName:     ln.ContactName,
-				Account:         ln.Account,
-				VATType:         ln.VATType,
-				Reason:          "deviates_from_vendor_pattern",
-				ExpectedVATType: modal,
-			})
+			findings = append(findings, vatAnomalyFindingOf(ln, vatAnomalyDeviates, modal))
 		}
 	}
 	sort.SliceStable(findings, func(i, j int) bool {
@@ -145,21 +144,22 @@ func vatAnomalyScan(lines []vatAnomalyLine, minSamples int) []vatAnomalyFinding 
 
 func newNovelVatAnomalyCmd(flags *rootFlags) *cobra.Command {
 	var flagCompany string
-	var flagPeriod string
 	var dbPath string
+	var opts reportOpts
 
 	cmd := &cobra.Command{
 		Use:   "vat-anomaly",
 		Short: "Flag implausible or pattern-deviating VAT types on lines",
 		Long: "Flags sale/purchase lines whose VAT type is invalid for the side (a purchase-only type\n" +
 			"on a sale, etc.) or that deviates from the VAT type the business usually applies to that\n" +
-			"(contact, account) pair (requires >=3 samples for the pair). Reads the local mirror.",
+			"(contact, account) pair (requires >=3 samples for the pair). The pattern is learned from\n" +
+			"all history; only lines inside the period are reported. Reads the local mirror.",
 		Example: strings.Trim(`
   fiken-cli vat-anomaly --company fiken-demo
   fiken-cli vat-anomaly --company fiken-demo --period 2026 --agent`, "\n"),
 		Annotations: map[string]string{"mcp:read-only": "true"},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			from, to, err := parsePeriod(flagPeriod)
+			win, err := resolvePeriod(opts.period)
 			if err != nil {
 				return err
 			}
@@ -176,31 +176,28 @@ func newNovelVatAnomalyCmd(flags *rootFlags) *cobra.Command {
 				return err
 			}
 
-			inPeriod := func(date string) bool {
-				if from != "" && date < from {
-					return false
-				}
-				if to != "" && date > to {
-					return false
-				}
-				return true
-			}
+			undated := 0
 			collect := func(docs []map[string]json.RawMessage, docType, side, idKey, contactKey string) []vatAnomalyLine {
 				var out []vatAnomalyLine
 				for _, d := range docs {
 					id, _ := jsonInt(d, idKey)
 					date := jsonStr(d, "date")
+					if date == "" {
+						// Undated is counted per document, not per line: the
+						// document cannot be placed in any window, so its
+						// lines are pattern history only.
+						undated++
+					}
 					var contactID int64
 					var contactName string
 					// supplier/customer is a single nested object, not an array.
-					if raw, ok := d[contactKey]; ok {
-						var ent map[string]json.RawMessage
-						if json.Unmarshal(raw, &ent) == nil {
-							contactID, _ = jsonInt(ent, "contactId")
-							contactName = jsonStr(ent, "name")
-						}
+					if ent := jsonObject(d, contactKey); ent != nil {
+						contactID, _ = jsonInt(ent, "contactId")
+						contactName = jsonStr(ent, "name")
 					}
+					inPeriod := win.Contains(date)
 					for _, ln := range jsonObjects(d, "lines") {
+						vat, _ := jsonInt(ln, "vat")
 						out = append(out, vatAnomalyLine{
 							DocType:     docType,
 							Side:        side,
@@ -208,9 +205,11 @@ func newNovelVatAnomalyCmd(flags *rootFlags) *cobra.Command {
 							Date:        date,
 							ContactID:   contactID,
 							ContactName: contactName,
+							Description: jsonStr(ln, "description"),
 							Account:     jsonStr(ln, "account"),
 							VATType:     jsonStr(ln, "vatType"),
-							InPeriod:    inPeriod(date),
+							VATOre:      vat,
+							InPeriod:    inPeriod,
 						})
 					}
 				}
@@ -229,39 +228,26 @@ func newNovelVatAnomalyCmd(flags *rootFlags) *cobra.Command {
 			lines = append(lines, collect(sales, "sale", fikencore.SideSales, "saleId", "customer")...)
 			lines = append(lines, collect(purchases, "purchase", fikencore.SidePurchases, "purchaseId", "supplier")...)
 
-			findings := vatAnomalyScan(lines, 3)
-			report := vatAnomalyReport{
-				Company:       slug,
-				Period:        flagPeriod,
-				TotalFindings: len(findings),
-				Findings:      findings,
+			report := Report{
+				Company:  slug,
+				Detector: "vat_anomaly",
+				Window:   win,
+				Undated:  undated,
+				Params:   map[string]any{"min_samples": vatAnomalyMinSamples},
 			}
-			return emitFiken(cmd, flags, report, func() {
-				w := cmd.OutOrStdout()
-				fmt.Fprintf(w, "VAT anomalies for %s", report.Company)
-				if report.Period != "" {
-					fmt.Fprintf(w, " (%s)", report.Period)
+			keyFn := func(f Finding) map[string]string {
+				expected, _ := f.Detail["expected_vat_type"].(string)
+				return map[string]string{
+					"kind":              f.Kind,
+					"vat_type":          f.VATType,
+					"expected_vat_type": expected,
 				}
-				fmt.Fprintf(w, "\n\n")
-				if len(report.Findings) == 0 {
-					fmt.Fprintln(w, "No VAT anomalies detected.")
-					return
-				}
-				for _, f := range report.Findings {
-					fmt.Fprintf(w, "%s #%d  %s  account %s  vatType %s\n", f.DocType, f.DocID, f.Date, f.Account, f.VATType)
-					switch f.Reason {
-					case "invalid_for_side":
-						fmt.Fprintf(w, "  reason: VAT type %q is not valid for a %s\n", f.VATType, f.DocType)
-					case "deviates_from_vendor_pattern":
-						fmt.Fprintf(w, "  reason: usually %q for %s on this account\n", f.ExpectedVATType, orNone(f.ContactName))
-					}
-				}
-				fmt.Fprintf(w, "\nTotal findings: %d\n", report.TotalFindings)
-			})
+			}
+			return finishReport(cmd, flags, report, vatAnomalyScan(lines, vatAnomalyMinSamples), keyFn, opts)
 		},
 	}
 	cmd.Flags().StringVar(&flagCompany, "company", "", "Company slug (default: the single synced company)")
-	cmd.Flags().StringVar(&flagPeriod, "period", "", "Period to scan: YYYY, YYYY-MM, YYYY-Qn, or from:to (default: all)")
 	cmd.Flags().StringVar(&dbPath, "db", "", "Mirror database path (default: ~/.local/share/fiken-cli/data.db)")
+	addReportFlags(cmd, &opts)
 	return cmd
 }

@@ -33,29 +33,20 @@ import (
 	"fiken-cli/internal/fikencore"
 )
 
-type driftFinding struct {
-	Kind        string `json:"kind"` // total_mismatch | one of the fikencore line-invariant kinds
-	DocType     string `json:"doc_type"`
-	DocID       int64  `json:"doc_id"`
-	Date        string `json:"date"`
-	Account     string `json:"account,omitempty"`
-	VATType     string `json:"vat_type,omitempty"`
-	ExpectedOre int64  `json:"expected_ore"`
-	Expected    string `json:"expected"`
-	ActualOre   int64  `json:"actual_ore"`
-	Actual      string `json:"actual"`
-	DiffOre     int64  `json:"diff_ore"`
-	Diff        string `json:"diff"`
-	Note        string `json:"note"`
+// driftSeverity grades a drift kind. The regime-invariant breaches are
+// errors: the line contradicts the VAT regime its own vatType declares, so the
+// MVA return is wrong. A rate difference or a header/lines difference is a
+// warning — usually rounding or an aggregation artefact, not a wrong regime.
+func driftSeverity(kind string) Severity {
+	switch kind {
+	case driftKindTotalMismatch, fikencore.KindVATRate:
+		return SeverityWarning
+	default:
+		return SeverityError
+	}
 }
 
-type driftReport struct {
-	Company       string         `json:"company"`
-	Period        string         `json:"period,omitempty"`
-	ToleranceOre  int64          `json:"tolerance_ore"`
-	TotalFindings int            `json:"total_findings"`
-	Findings      []driftFinding `json:"findings"`
-}
+const driftKindTotalMismatch = "total_mismatch"
 
 func absInt64(x int64) int64 {
 	if x < 0 {
@@ -66,22 +57,26 @@ func absInt64(x int64) int64 {
 
 // driftScanDoc represents the minimal shape the drift detector needs from one
 // sale or purchase: a header net/vat total (sales only; zero+hasHeader=false
-// for purchases) and its order lines.
+// for purchases), the counterpart contact, and its order lines.
 type driftScanDoc struct {
-	DocType   string // sale | purchase
-	DocID     int64
-	Date      string
-	HasHeader bool  // sales carry netAmount/vatAmount; purchases do not
-	NetAmount int64 // header net (øre)
-	VATAmount int64 // header vat (øre)
-	Lines     []driftScanLine
+	DocType     string // sale | purchase
+	DocID       int64
+	Date        string
+	ContactID   int64
+	ContactName string
+	Description string
+	HasHeader   bool  // sales carry netAmount/vatAmount; purchases do not
+	NetAmount   int64 // header net (øre)
+	VATAmount   int64 // header vat (øre)
+	Lines       []driftScanLine
 }
 
 type driftScanLine struct {
-	Account  string
-	VATType  string
-	NetPrice int64
-	VAT      int64
+	Account     string
+	VATType     string
+	Description string
+	NetPrice    int64
+	VAT         int64
 }
 
 // driftNote explains a line-invariant violation in the terms of its regime.
@@ -100,10 +95,37 @@ func driftNote(kind, vatType string, expected, actual int64) string {
 	}
 }
 
+// driftFinding builds the shared Finding for one drift hit. ImpactOre is the
+// signed difference; expected/actual stay in Detail as raw øre (the text
+// renderer formats them, so the JSON carries no pre-formatted kroner strings).
+func driftFinding(d driftScanDoc, kind, account, vatType, description string, expected, actual, diff int64, note string) Finding {
+	if description == "" {
+		description = d.Description
+	}
+	return Finding{
+		Kind:        kind,
+		Severity:    driftSeverity(kind),
+		DocType:     d.DocType,
+		DocID:       d.DocID,
+		Date:        d.Date,
+		ContactID:   d.ContactID,
+		ContactName: d.ContactName,
+		Description: description,
+		Account:     account,
+		VATType:     vatType,
+		ImpactOre:   diff,
+		Detail: map[string]any{
+			"expected_ore": expected,
+			"actual_ore":   actual,
+			"note":         note,
+		},
+	}
+}
+
 // driftScan is the pure detector: given the scanned docs and a tolerance in
 // øre, it returns every finding. Kept free of Cobra/DB so it is unit-testable.
-func driftScan(docs []driftScanDoc, toleranceOre int64) []driftFinding {
-	var findings []driftFinding
+func driftScan(docs []driftScanDoc, toleranceOre int64) []Finding {
+	var findings []Finding
 	for _, d := range docs {
 		// total_mismatch: header vs summed lines (sales only).
 		if d.HasHeader {
@@ -113,53 +135,21 @@ func driftScan(docs []driftScanDoc, toleranceOre int64) []driftFinding {
 				sumVAT += ln.VAT
 			}
 			if diff := sumNet - d.NetAmount; absInt64(diff) > toleranceOre {
-				findings = append(findings, driftFinding{
-					Kind:        "total_mismatch",
-					DocType:     d.DocType,
-					DocID:       d.DocID,
-					Date:        d.Date,
-					ExpectedOre: d.NetAmount,
-					Expected:    kr(d.NetAmount),
-					ActualOre:   sumNet,
-					Actual:      kr(sumNet),
-					DiffOre:     diff,
-					Diff:        kr(diff),
-					Note:        "sum of line net differs from header netAmount",
-				})
+				findings = append(findings, driftFinding(d, driftKindTotalMismatch, "", "", "",
+					d.NetAmount, sumNet, diff, "sum of line net differs from header netAmount"))
 			}
 			if diff := sumVAT - d.VATAmount; absInt64(diff) > toleranceOre {
-				findings = append(findings, driftFinding{
-					Kind:        "total_mismatch",
-					DocType:     d.DocType,
-					DocID:       d.DocID,
-					Date:        d.Date,
-					ExpectedOre: d.VATAmount,
-					Expected:    kr(d.VATAmount),
-					ActualOre:   sumVAT,
-					Actual:      kr(sumVAT),
-					DiffOre:     diff,
-					Diff:        kr(diff),
-					Note:        "sum of line vat differs from header vatAmount",
-				})
+				findings = append(findings, driftFinding(d, driftKindTotalMismatch, "", "", "",
+					d.VATAmount, sumVAT, diff, "sum of line vat differs from header vatAmount"))
 			}
 		}
 		// Per-line VAT: the invariant that the line's regime carries.
 		for _, ln := range d.Lines {
 			info, known := fikencore.Lookup(ln.VATType)
 			if !known {
-				findings = append(findings, driftFinding{
-					Kind:      fikencore.KindUnknownVATType,
-					DocType:   d.DocType,
-					DocID:     d.DocID,
-					Date:      d.Date,
-					Account:   ln.Account,
-					VATType:   ln.VATType,
-					Expected:  kr(0),
-					ActualOre: ln.VAT,
-					Actual:    kr(ln.VAT),
-					Diff:      kr(0),
-					Note:      fmt.Sprintf("vatType %s is not a recognized Fiken type — its VAT cannot be checked", orNone(ln.VATType)),
-				})
+				findings = append(findings, driftFinding(d, fikencore.KindUnknownVATType, ln.Account, ln.VATType, ln.Description,
+					0, ln.VAT, 0,
+					fmt.Sprintf("vatType %s is not a recognized Fiken type — its VAT cannot be checked", orNone(ln.VATType))))
 				continue
 			}
 			ok, kind, diff := fikencore.LineInvariant(info, ln.NetPrice, ln.VAT, toleranceOre)
@@ -173,21 +163,8 @@ func driftScan(docs []driftScanDoc, toleranceOre int64) []driftFinding {
 				actual = ln.NetPrice
 			}
 			expected := actual - diff
-			findings = append(findings, driftFinding{
-				Kind:        kind,
-				DocType:     d.DocType,
-				DocID:       d.DocID,
-				Date:        d.Date,
-				Account:     ln.Account,
-				VATType:     ln.VATType,
-				ExpectedOre: expected,
-				Expected:    kr(expected),
-				ActualOre:   actual,
-				Actual:      kr(actual),
-				DiffOre:     diff,
-				Diff:        kr(diff),
-				Note:        driftNote(kind, ln.VATType, expected, actual),
-			})
+			findings = append(findings, driftFinding(d, kind, ln.Account, ln.VATType, ln.Description,
+				expected, actual, diff, driftNote(kind, ln.VATType, expected, actual)))
 		}
 	}
 	sort.SliceStable(findings, func(i, j int) bool {
@@ -201,9 +178,9 @@ func driftScan(docs []driftScanDoc, toleranceOre int64) []driftFinding {
 
 func newNovelDriftCmd(flags *rootFlags) *cobra.Command {
 	var flagCompany string
-	var flagPeriod string
 	var dbPath string
 	var toleranceOre int64
+	var opts reportOpts
 
 	cmd := &cobra.Command{
 		Use:   "drift",
@@ -220,7 +197,7 @@ func newNovelDriftCmd(flags *rootFlags) *cobra.Command {
   fiken-cli drift --company fiken-demo --period 2026-Q1 --tolerance-ore 2 --agent`, "\n"),
 		Annotations: map[string]string{"mcp:read-only": "true"},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			from, to, err := parsePeriod(flagPeriod)
+			win, err := resolvePeriod(opts.period)
 			if err != nil {
 				return err
 			}
@@ -240,54 +217,62 @@ func newNovelDriftCmd(flags *rootFlags) *cobra.Command {
 				return err
 			}
 
-			inPeriod := func(date string) bool {
-				if date == "" {
-					return false
-				}
-				if from != "" && date < from {
-					return false
-				}
-				if to != "" && date > to {
-					return false
-				}
-				return true
-			}
 			scanLines := func(m map[string]json.RawMessage) []driftScanLine {
 				var out []driftScanLine
 				for _, ln := range jsonObjects(m, "lines") {
 					net, _ := jsonInt(ln, "netPrice")
 					vat, _ := jsonInt(ln, "vat")
 					out = append(out, driftScanLine{
-						Account:  jsonStr(ln, "account"),
-						VATType:  jsonStr(ln, "vatType"),
-						NetPrice: net,
-						VAT:      vat,
+						Account:     jsonStr(ln, "account"),
+						VATType:     jsonStr(ln, "vatType"),
+						Description: jsonStr(ln, "description"),
+						NetPrice:    net,
+						VAT:         vat,
 					})
 				}
 				return out
 			}
+			// The counterpart contact is embedded in the document (customer on
+			// a sale, supplier on a purchase), so no second lookup is needed.
+			contactOf := func(m map[string]json.RawMessage, key string) (int64, string) {
+				ent := jsonObject(m, key)
+				if ent == nil {
+					return 0, ""
+				}
+				id, _ := jsonInt(ent, "contactId")
+				return id, jsonStr(ent, "name")
+			}
 
 			var docs []driftScanDoc
+			undated := 0
 			sales, err := loadCompanyResources(cmd.Context(), db, "sales", slug)
 			if err != nil {
 				return err
 			}
 			for _, s := range sales {
 				date := jsonStr(s, "date")
-				if !inPeriod(date) {
+				if date == "" {
+					undated++
+					continue
+				}
+				if !win.Contains(date) {
 					continue
 				}
 				id, _ := jsonInt(s, "saleId")
 				net, _ := jsonInt(s, "netAmount")
 				vat, _ := jsonInt(s, "vatAmount")
+				cid, cname := contactOf(s, "customer")
 				docs = append(docs, driftScanDoc{
-					DocType:   "sale",
-					DocID:     id,
-					Date:      date,
-					HasHeader: true,
-					NetAmount: net,
-					VATAmount: vat,
-					Lines:     scanLines(s),
+					DocType:     "sale",
+					DocID:       id,
+					Date:        date,
+					ContactID:   cid,
+					ContactName: cname,
+					Description: jsonStr(s, "saleNumber"),
+					HasHeader:   true,
+					NetAmount:   net,
+					VATAmount:   vat,
+					Lines:       scanLines(s),
 				})
 			}
 			purchases, err := loadCompanyResources(cmd.Context(), db, "purchases", slug)
@@ -296,51 +281,42 @@ func newNovelDriftCmd(flags *rootFlags) *cobra.Command {
 			}
 			for _, p := range purchases {
 				date := jsonStr(p, "date")
-				if !inPeriod(date) {
+				if date == "" {
+					undated++
+					continue
+				}
+				if !win.Contains(date) {
 					continue
 				}
 				id, _ := jsonInt(p, "purchaseId")
+				cid, cname := contactOf(p, "supplier")
 				docs = append(docs, driftScanDoc{
-					DocType: "purchase",
-					DocID:   id,
-					Date:    date,
-					Lines:   scanLines(p),
+					DocType:     "purchase",
+					DocID:       id,
+					Date:        date,
+					ContactID:   cid,
+					ContactName: cname,
+					Description: jsonStr(p, "identifier"),
+					Lines:       scanLines(p),
 				})
 			}
 
-			findings := driftScan(docs, toleranceOre)
-			report := driftReport{
-				Company:       slug,
-				Period:        flagPeriod,
-				ToleranceOre:  toleranceOre,
-				TotalFindings: len(findings),
-				Findings:      findings,
+			report := Report{
+				Company:  slug,
+				Detector: "drift",
+				Window:   win,
+				Undated:  undated,
+				Params:   map[string]any{"tolerance_ore": toleranceOre},
 			}
-			return emitFiken(cmd, flags, report, func() {
-				w := cmd.OutOrStdout()
-				fmt.Fprintf(w, "Drift findings for %s", report.Company)
-				if report.Period != "" {
-					fmt.Fprintf(w, " (%s)", report.Period)
-				}
-				fmt.Fprintf(w, " — tolerance %s kr\n\n", kr(report.ToleranceOre))
-				if len(report.Findings) == 0 {
-					fmt.Fprintln(w, "No drift detected.")
-					return
-				}
-				for _, f := range report.Findings {
-					fmt.Fprintf(w, "%-14s %s #%d  %s\n", f.Kind, f.DocType, f.DocID, f.Date)
-					if f.Account != "" || f.VATType != "" {
-						fmt.Fprintf(w, "  account %s  vatType %s\n", orNone(f.Account), orNone(f.VATType))
-					}
-					fmt.Fprintf(w, "  expected %s, actual %s, diff %s — %s\n", f.Expected, f.Actual, f.Diff, f.Note)
-				}
-				fmt.Fprintf(w, "\nTotal findings: %d\n", report.TotalFindings)
-			})
+			keyFn := func(f Finding) map[string]string {
+				return map[string]string{"kind": f.Kind, "vat_type": f.VATType}
+			}
+			return finishReport(cmd, flags, report, driftScan(docs, toleranceOre), keyFn, opts)
 		},
 	}
 	cmd.Flags().StringVar(&flagCompany, "company", "", "Company slug (default: the single synced company)")
-	cmd.Flags().StringVar(&flagPeriod, "period", "", "Period to scan: YYYY, YYYY-MM, YYYY-Qn, or from:to (default: all)")
 	cmd.Flags().StringVar(&dbPath, "db", "", "Mirror database path (default: ~/.local/share/fiken-cli/data.db)")
 	cmd.Flags().Int64Var(&toleranceOre, "tolerance-ore", 5, "Ignore differences at or below this many øre (flat, not a percentage)")
+	addReportFlags(cmd, &opts)
 	return cmd
 }
