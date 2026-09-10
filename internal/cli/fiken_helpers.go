@@ -170,15 +170,54 @@ func jsonObject(m map[string]json.RawMessage, key string) map[string]json.RawMes
 	return obj
 }
 
-// topKey returns the highest-count key in a frequency map (empty when empty).
-func topKey(counts map[string]int) string {
-	best, bestN := "", -1
-	for k, n := range counts {
-		if n > bestN || (n == bestN && k < best) {
-			best, bestN = k, n
+// dated is one observation for recentModal: a YYYY-MM-DD date and the string
+// value seen on that date (a vatType, an account, or a composite key).
+type dated struct {
+	Date  string
+	Value string
+}
+
+// recentModal returns the most frequent Value among the observations dated in
+// the trailing months before at, together with how many observations supported
+// it. The comparison window is half-open, [at-months, at): an observation dated
+// exactly at-months votes, one dated at itself does NOT — so a line never votes
+// on its own expected value, and neither do its same-day siblings. months <= 0
+// means no lower bound (everything strictly before at counts), which is how
+// callers ask for the whole-history modal.
+//
+// Observations with an empty value or an empty/unparseable date are ignored, as
+// is an unparseable at (which yields "", 0). Ties resolve deterministically:
+// higher count first, then the lexicographically smallest value.
+func recentModal(obs []dated, at string, months int) (string, int) {
+	atT, err := time.Parse("2006-01-02", at)
+	if err != nil {
+		return "", 0
+	}
+	var from time.Time
+	if months > 0 {
+		from = atT.AddDate(0, -months, 0)
+	}
+	counts := map[string]int{}
+	for _, o := range obs {
+		if o.Value == "" {
+			continue
+		}
+		d, err := time.Parse("2006-01-02", o.Date)
+		if err != nil || !d.Before(atT) {
+			continue
+		}
+		if months > 0 && d.Before(from) {
+			continue
+		}
+		counts[o.Value]++
+	}
+	best, bestN := "", 0
+	for v, n := range counts {
+		if n > bestN || (n == bestN && v < best) {
+			best, bestN = v, n
 		}
 	}
-	return best
+	return best, bestN
 }
 
 // emitFiken writes v as filtered JSON when --agent/--json (or piped) is in
@@ -204,6 +243,34 @@ func kr(ore int64) string {
 		return "-" + s
 	}
 	return s
+}
+
+// nowFunc is the clock the period resolver reads. A package-level var so
+// tests can pin "now" and assert the default-year behaviour deterministically.
+var nowFunc = time.Now
+
+// resolvePeriod turns the --period flag into a resolved Window, and is the one
+// place that decides what an unset --period means. The tool serves the open
+// year, so unset is the current calendar year rather than all history; "all"
+// (any case) opts back out to unbounded. Everything else goes to parsePeriod.
+func resolvePeriod(flag string) (Window, error) {
+	s := strings.TrimSpace(flag)
+	if s == "" {
+		y := nowFunc().Year()
+		return Window{
+			From:   fmt.Sprintf("%04d-01-01", y),
+			To:     fmt.Sprintf("%04d-12-31", y),
+			Source: "default_current_year",
+		}, nil
+	}
+	if strings.EqualFold(s, "all") {
+		return Window{Source: "all"}, nil
+	}
+	from, to, err := parsePeriod(s)
+	if err != nil {
+		return Window{}, err
+	}
+	return Window{From: from, To: to, Source: "flag"}, nil
 }
 
 // parsePeriod turns a period token into an inclusive [from,to] YYYY-MM-DD

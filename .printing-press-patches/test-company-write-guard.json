@@ -1,0 +1,27 @@
+{
+  "schema_version": 2,
+  "id": "test-company-write-guard",
+  "applied_at": "2026-09-10",
+  "base_run_id": "20260609-145046",
+  "base_printing_press_version": "4.24.0",
+  "summary": "feat(safety): fail-closed test-company write guard on the transport and in doInternal",
+  "reason": "The printed CLI has ~86 mutating call sites, of which 3 carry a --yes check; nothing scopes a write to a particular company. An agent driving the CLI could therefore post to real books. The guard (hand-authored internal/client/write_guard.go) denies every mutating verb on a Fiken host unless the company slug in the path resolves, via the local SQLite mirror, to testCompany:true — or the process was deliberately put in live mode through an untracked env file (FIKEN_MODE, never a CLI flag). Its default state is 'resolver unset', which denies, so a future code path that forgets to wire it cannot write. Enforcement is duplicated on purpose: the hand-authored transport (regen-safe, catches refreshAccessToken and anything else using http.DefaultTransport) and doInternal (regen-losable, but produces the structured cliError and exit code before a request is built). The generated-file edits are three one-to-five-line insertions: the doInternal guard call, the resolver wiring at the two *Client construction sites, and the WriteGuardError -> exit-code mapping in Execute.",
+  "files": [
+    "internal/client/client.go",
+    "internal/client/fiken_transport.go",
+    "internal/client/write_guard.go",
+    "internal/cli/root.go",
+    "internal/cli/write_guard_setup.go",
+    "internal/mcp/tools.go"
+  ],
+  "call_sites": [
+    "GuardMutation(",
+    "ConfigureWriteGuard(",
+    "guardMutationURL(",
+    "configureWriteGuard(f)",
+    "writeGuardCLIError(",
+    "ConfigureWriteGuardForMCP("
+  ],
+  "validated_outcome": "go build ./..., go vet ./... and go test -count=1 ./... all pass. internal/client/write_guard_test.go walks 5 verbs x 7 guard states x 4 path shapes and asserts a recording base RoundTripper is never called on a denial; internal/cli/write_guard_setup_test.go pins the dotenv parser and the mode precedence (--agent and PRINTING_PRESS_VERIFY force test). No live API call was made.",
+  "patch_count": 4
+}

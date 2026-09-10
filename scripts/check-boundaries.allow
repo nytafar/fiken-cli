@@ -1,0 +1,8 @@
+# HAND-AUTHORED. Allowlist for scripts/check-boundaries.sh check (b):
+# `path:pattern` — a known `strings.HasPrefix` on a vatType, reported as a
+# warning instead of a failure. Each entry is debt, not a blessing.
+#
+# EMPTY, and it should stay that way. The private rate tables that used to be
+# listed here (internal/cli/drift.go, internal/fikencore/validate.go) are gone:
+# every rate and regime now comes from internal/fikencore/vat.go, which matches
+# a vatType exactly and never by prefix.

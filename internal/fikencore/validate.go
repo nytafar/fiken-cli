@@ -19,6 +19,10 @@ const (
 	SeverityWarning = "warning"
 )
 
+// vatLineTolerance is the øre of rounding slack the write path allows on a
+// line's VAT before it warns.
+const vatLineTolerance = 2
+
 // ValidationFinding is one validation issue.
 type ValidationFinding struct {
 	Severity string `json:"severity"`
@@ -38,12 +42,6 @@ func (r *ValidationResult) addError(code, msg string) {
 }
 func (r *ValidationResult) addWarning(code, msg string) {
 	r.Warnings = append(r.Warnings, ValidationFinding{SeverityWarning, code, msg})
-}
-
-// standard MVA rates by type (basis points of netPrice), for the rounding check.
-var vatRateByType = map[string]float64{
-	"HIGH": 0.25, "MEDIUM": 0.15, "LOW": 0.12, "RAW_FISH": 0.1111,
-	"HIGH_DIRECT": 0.25, "HIGH_BASIS": 0.25, "MEDIUM_DIRECT": 0.15, "MEDIUM_BASIS": 0.15,
 }
 
 // ValidateProposal runs all structural checks. Errors block a commit (unless
@@ -117,10 +115,26 @@ func validateLine(i int, l ProposalLine, side string, validAccounts map[string]b
 	if l.NetPrice < 0 {
 		r.addError("negative_net", where+": netPrice is negative")
 	}
-	if rate, ok := vatRateByType[l.VatType]; ok && l.NetPrice > 0 {
-		expected := int64(float64(l.NetPrice)*rate + 0.5)
-		if diff := l.Vat - expected; diff > 2 || diff < -2 {
-			r.addWarning("vat_rounding", fmt.Sprintf("%s: vat %d øre deviates from expected %d øre for %s of net %d", where, l.Vat, expected, l.VatType, l.NetPrice))
+	// The line's vat means something different in each regime, so the only
+	// check is the invariant that regime carries (vatLineTolerance øre of
+	// rounding slack on the arithmetic ones). A drift on an ordinary domestic
+	// line stays a warning; a regime violation — VAT on a basis line, a basis
+	// on a direct line — is a coding error and blocks the commit.
+	if info, ok := Lookup(l.VatType); ok {
+		if inv, kind, diff := LineInvariant(info, l.NetPrice, l.Vat, vatLineTolerance); !inv {
+			switch kind {
+			case KindVATRate:
+				expected, _ := ExpectedLineVAT(info, l.NetPrice)
+				r.addWarning("vat_rounding", fmt.Sprintf("%s: vat %d øre deviates from expected %d øre for %s of net %d", where, l.Vat, expected, l.VatType, l.NetPrice))
+			case KindBasisHasVAT:
+				r.addError(kind, fmt.Sprintf("%s: %s is a basis (grunnlag) type — the line vat must be 0, got %d øre", where, l.VatType, l.Vat))
+			case KindZeroRatedHasVAT:
+				r.addError(kind, fmt.Sprintf("%s: %s carries no VAT — the line vat must be 0, got %d øre", where, l.VatType, l.Vat))
+			case KindDirectHasNet:
+				r.addError(kind, fmt.Sprintf("%s: %s posts VAT with no basis — netPrice must be 0, got %d øre", where, l.VatType, l.NetPrice))
+			case KindNondeductibleEmbeddedVAT:
+				r.addError(kind, fmt.Sprintf("%s: %s expects the embedded VAT %d øre (netPrice is VAT-inclusive), got %d øre — off by %d", where, l.VatType, l.Vat-diff, l.Vat, diff))
+			}
 		}
 	}
 	if len(validAccounts) > 0 && l.Account != "" && !accountKnown(l.Account, validAccounts) {

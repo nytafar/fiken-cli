@@ -9,20 +9,6 @@ import (
 	"fiken-cli/internal/fikencore"
 )
 
-func TestModalVATType(t *testing.T) {
-	if got, n := modalVATType(nil); got != "" || n != 0 {
-		t.Errorf("modalVATType(nil) = %q,%d; want \"\",0", got, n)
-	}
-	got, n := modalVATType(map[string]int{"HIGH": 3, "LOW": 1})
-	if got != "HIGH" || n != 3 {
-		t.Errorf("modalVATType = %q,%d; want HIGH,3", got, n)
-	}
-	// Tie broken by lexicographically smallest type.
-	if got, _ := modalVATType(map[string]int{"LOW": 2, "HIGH": 2}); got != "HIGH" {
-		t.Errorf("tie modal = %q; want HIGH (lexicographic tie-break)", got)
-	}
-}
-
 func TestVatAnomalyScan(t *testing.T) {
 	t.Run("empty input yields nothing", func(t *testing.T) {
 		if got := vatAnomalyScan(nil, 3); len(got) != 0 {
@@ -34,11 +20,19 @@ func TestVatAnomalyScan(t *testing.T) {
 		// HIGH_DIRECT is valid only for purchases.
 		lines := []vatAnomalyLine{{
 			DocType: "sale", Side: fikencore.SideSales, DocID: 1, Date: "2026-01-01",
-			Account: "3000:1", VATType: "HIGH_DIRECT", InPeriod: true,
+			Account: "3000:1", VATType: "HIGH_DIRECT", Description: "Konsulenttime", VATOre: 2500, InPeriod: true,
 		}}
 		got := vatAnomalyScan(lines, 3)
-		if len(got) != 1 || got[0].Reason != "invalid_for_side" {
+		if len(got) != 1 || got[0].Kind != "invalid_for_side" {
 			t.Fatalf("got %+v; want one invalid_for_side", got)
+		}
+		if got[0].Severity != SeverityError {
+			t.Errorf("severity = %q; want error (the MVA return is wrong)", got[0].Severity)
+		}
+		// The line's own VAT is the money at stake, and the line description
+		// travels with the finding.
+		if got[0].ImpactOre != 2500 || got[0].Description != "Konsulenttime" {
+			t.Errorf("finding = %+v; want impact 2500 and the line description", got[0])
 		}
 	})
 
@@ -70,11 +64,14 @@ func TestVatAnomalyScan(t *testing.T) {
 		if len(got) != 1 {
 			t.Fatalf("got %d findings %+v; want 1", len(got), got)
 		}
-		if got[0].Reason != "deviates_from_vendor_pattern" {
-			t.Errorf("reason = %q; want deviates_from_vendor_pattern", got[0].Reason)
+		if got[0].Kind != "deviates_from_vendor_pattern" {
+			t.Errorf("kind = %q; want deviates_from_vendor_pattern", got[0].Kind)
 		}
-		if got[0].ExpectedVATType != "HIGH" {
-			t.Errorf("expected modal = %q; want HIGH", got[0].ExpectedVATType)
+		if got[0].Severity != SeverityWarning {
+			t.Errorf("severity = %q; want warning", got[0].Severity)
+		}
+		if got[0].Detail["expected_vat_type"] != "HIGH" {
+			t.Errorf("expected modal = %v; want HIGH", got[0].Detail["expected_vat_type"])
 		}
 	})
 
@@ -94,6 +91,94 @@ func TestVatAnomalyScan(t *testing.T) {
 		}
 		if got := vatAnomalyScan(lines, 3); len(got) != 0 {
 			t.Fatalf("got %+v; want none (deviation out of period)", got)
+		}
+	})
+
+	t.Run("a regime change 14 months ago does not taint this year", func(t *testing.T) {
+		mk := func(id int64, date, vt string, inPeriod bool) vatAnomalyLine {
+			return vatAnomalyLine{
+				DocType: "purchase", Side: fikencore.SidePurchases, DocID: id, Date: date,
+				ContactID: 7, ContactName: "Foreign Host Ltd", Account: "6810:1",
+				Description: "Hosting", VATType: vt, InPeriod: inPeriod,
+			}
+		}
+		// Reverse charge until mid-2025, plain domestic HIGH ever since.
+		lines := []vatAnomalyLine{
+			mk(1, "2024-09-01", "HIGH_FOREIGN_SERVICE_DEDUCTIBLE", false),
+			mk(2, "2024-12-01", "HIGH_FOREIGN_SERVICE_DEDUCTIBLE", false),
+			mk(3, "2025-03-01", "HIGH_FOREIGN_SERVICE_DEDUCTIBLE", false),
+			mk(4, "2025-07-01", "HIGH", false),
+			mk(5, "2025-09-01", "HIGH", false),
+			mk(6, "2025-11-01", "HIGH", false),
+			mk(7, "2026-02-01", "HIGH", true),
+			mk(8, "2026-05-01", "HIGH", true),
+		}
+		if got := vatAnomalyScan(lines, 3); len(got) != 0 {
+			t.Fatalf("got %+v; want none (the old regime is outside the 12-month window)", got)
+		}
+	})
+
+	t.Run("two products on one contact do not flag each other", func(t *testing.T) {
+		mk := func(id int64, date, desc, vt string) vatAnomalyLine {
+			return vatAnomalyLine{
+				DocType: "purchase", Side: fikencore.SidePurchases, DocID: id, Date: date,
+				ContactID: 9, Account: "4300:1", Description: desc, VATType: vt, InPeriod: true,
+			}
+		}
+		// Same contact and account, two descriptions with their own VAT type.
+		// The normalised description keeps the groups apart; case and internal
+		// whitespace do not split a group.
+		lines := []vatAnomalyLine{
+			mk(1, "2026-01-05", "Kaffe  bønner", "HIGH"),
+			mk(2, "2026-02-05", "kaffe bønner", "HIGH"),
+			mk(3, "2026-03-05", "  KAFFE bønner ", "HIGH"),
+			mk(4, "2026-04-05", "kaffe bønner", "HIGH"),
+			mk(5, "2026-01-06", "Aviser", "LOW"),
+			mk(6, "2026-02-06", "Aviser", "LOW"),
+			mk(7, "2026-03-06", "Aviser", "LOW"),
+			mk(8, "2026-04-06", "Aviser", "LOW"),
+		}
+		if got := vatAnomalyScan(lines, 3); len(got) != 0 {
+			t.Fatalf("got %+v; want none (different products, each internally consistent)", got)
+		}
+	})
+
+	t.Run("min-samples applies to the support inside the window", func(t *testing.T) {
+		mk := func(id int64, date, vt string, inPeriod bool) vatAnomalyLine {
+			return vatAnomalyLine{
+				DocType: "purchase", Side: fikencore.SidePurchases, DocID: id, Date: date,
+				ContactID: 11, Account: "6540:1", Description: "Verktøy", VATType: vt, InPeriod: inPeriod,
+			}
+		}
+		lines := []vatAnomalyLine{
+			mk(1, "2026-01-01", "HIGH", false),
+			mk(2, "2026-02-01", "HIGH", false),
+			mk(3, "2026-03-01", "LOW", true),
+		}
+		if got := vatAnomalyScan(lines, 3); len(got) != 0 {
+			t.Fatalf("got %+v; want none (support 2 < min-samples 3)", got)
+		}
+		got := vatAnomalyScan(lines, 2)
+		if len(got) != 1 {
+			t.Fatalf("got %d findings %+v; want 1 at min-samples 2", len(got), got)
+		}
+		if got[0].Detail["expected_vat_type"] != "HIGH" || got[0].Detail["modal_support"] != 2 {
+			t.Errorf("detail = %+v; want expected HIGH with modal_support 2", got[0].Detail)
+		}
+	})
+
+	t.Run("same-day siblings do not vote on each other", func(t *testing.T) {
+		mk := func(id int64, vt string) vatAnomalyLine {
+			return vatAnomalyLine{
+				DocType: "purchase", Side: fikencore.SidePurchases, DocID: id, Date: "2026-04-01",
+				ContactID: 13, Account: "6540:1", Description: "Verktøy", VATType: vt, InPeriod: true,
+			}
+		}
+		// The window is exclusive of the line's own date, so three HIGH lines
+		// posted the same day as the LOW one give it a support of 0.
+		lines := []vatAnomalyLine{mk(1, "HIGH"), mk(2, "HIGH"), mk(3, "HIGH"), mk(4, "LOW")}
+		if got := vatAnomalyScan(lines, 3); len(got) != 0 {
+			t.Fatalf("got %+v; want none (same-day lines do not vote)", got)
 		}
 	})
 }

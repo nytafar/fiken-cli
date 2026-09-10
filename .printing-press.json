@@ -70,7 +70,7 @@
     {
       "name": "Imbalance \u0026 rounding-drift finder",
       "command": "drift",
-      "description": "Scans journal entries for debit≠credit imbalances and sub-krone øreavrunding drift using exact integer-øre arithmetic."
+      "description": "Scans sales and purchases for rounding/total drift and VAT-regime breaches using exact integer-øre arithmetic; journal debit/credit imbalance is not checked, because the mirrored journal lines carry no debit/credit direction."
     },
     {
       "name": "VAT-code anomaly detector",
@@ -80,12 +80,12 @@
     {
       "name": "MVA / VAT-period summary",
       "command": "mva-summary",
-      "description": "Reconstructs a VAT-return-shaped view from local lines: net basis and output/input VAT bucketed per VAT code, for any period."
+      "description": "Reconstructs a VAT-return-shaped view from local lines: net basis and output/input VAT bucketed by (vatType, mva_code), plus findings for reverse-charge journal mismatches, for any period."
     },
     {
       "name": "Period BI rollup",
       "command": "rollup",
-      "description": "Grouped revenue/cost/margin rollups over the local mirror by month, account, project, or contact."
+      "description": "Grouped revenue/cost/margin rollups over the local mirror by month, account, or contact."
     },
     {
       "name": "Posting proposal builder",
@@ -115,7 +115,7 @@
     {
       "name": "Missing-bilag report",
       "command": "missing-bilag",
-      "description": "Lists postings in a period that have no attached documentation (empty attachments)."
+      "description": "Lists purchases and journal entries in a period that have no attached documentation (empty attachments), ranked by document amount."
     },
     {
       "name": "Vendor posting-history profile",

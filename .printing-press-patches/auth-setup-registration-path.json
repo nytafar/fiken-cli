@@ -1,0 +1,18 @@
+{
+  "schema_version": 2,
+  "id": "auth-setup-registration-path",
+  "applied_at": "2026-09-10",
+  "base_run_id": "20260609-145046",
+  "base_printing_press_version": "4.24.0",
+  "summary": "fix(auth): 'auth setup' prints the real Fiken OAuth app registration path",
+  "reason": "The generated text pointed at bare https://fiken.no/. Fiken hides OAuth app registration behind an account-level developer flag, so that link leaves the user hunting. The command now prints the menu path from Fiken's own docs (Rediger konto -> Profil -> Andre innstillinger, then the API tab under Brukerinnstillinger), the redirect URI the login flow actually listens on, and the paid-module and 5-user development limits. The --launch URL stays https://fiken.no/.",
+  "files": [
+    "internal/cli/auth.go"
+  ],
+  "call_sites": [
+    "  2. Rediger konto -> Profil -> Andre innstillinger: tick the developer box",
+    "  3. Brukerinnstillinger -> API tab -> create an app",
+    "A new app is limited to 5 users until api@fiken.no grants production status."
+  ],
+  "validated_outcome": "Command output reviewed against Fiken's API documentation; go build ./... and go test ./... pass."
+}

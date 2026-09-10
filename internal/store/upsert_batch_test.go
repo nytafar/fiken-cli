@@ -334,7 +334,7 @@ func TestSearchQuotesFTSQuerySyntax(t *testing.T) {
 		json.RawMessage(`{"id": "hyphen", "value": "some-name"}`),
 		json.RawMessage(`{"id": "multi", "value": "error with extra words before timeout"}`),
 	}
-	if stored, failed, err := s.UpsertBatch("search-regression", items); err != nil {
+	if stored, failed, err := s.UpsertBatch("search_regression", items); err != nil {
 		t.Fatalf("UpsertBatch: %v", err)
 	} else if failed != 0 || stored != len(items) {
 		t.Fatalf("UpsertBatch stored=%d failed=%d, want stored=%d failed=0", stored, failed, len(items))
@@ -501,7 +501,7 @@ func TestUpsertBatch_PopulatesBankAccountsTable(t *testing.T) {
 	db := s.DB()
 
 	var generic int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM resources WHERE resource_type = ?`, "bank-accounts").Scan(&generic); err != nil {
+	if err := db.QueryRow(`SELECT COUNT(*) FROM resources WHERE resource_type = ?`, "bank_accounts").Scan(&generic); err != nil {
 		t.Fatalf("count resources: %v", err)
 	}
 	if generic != len(items) {
@@ -1311,7 +1311,7 @@ func TestUpsertBatch_PopulatesJournalEntriesTable(t *testing.T) {
 	db := s.DB()
 
 	var generic int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM resources WHERE resource_type = ?`, "journal-entries").Scan(&generic); err != nil {
+	if err := db.QueryRow(`SELECT COUNT(*) FROM resources WHERE resource_type = ?`, "journal_entries").Scan(&generic); err != nil {
 		t.Fatalf("count resources: %v", err)
 	}
 	if generic != len(items) {

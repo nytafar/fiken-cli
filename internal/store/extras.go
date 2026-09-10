@@ -1,4 +1,7 @@
 // Copyright 2026 Lasse Jellum and contributors. Licensed under Apache-2.0. See LICENSE.
+// HAND-AUTHORED (NOVEL). Not generated, not overwritten by regen-merge: this is the
+// sanctioned migration extension point for novel-feature tables, deliberately kept out
+// of the generated store so a reprint cannot drop it.
 
 package store
 

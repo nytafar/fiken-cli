@@ -3,7 +3,10 @@
 // HAND-AUTHORED (NOVEL) — table-driven tests for the pure rollup aggregator.
 package cli
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
 func TestAggregateRollup_Empty(t *testing.T) {
 	if got := aggregateRollup(nil); len(got) != 0 {
@@ -66,5 +69,68 @@ func TestMonthKey(t *testing.T) {
 		if got := monthKey(in); got != want {
 			t.Errorf("monthKey(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// The gross a purchase contributes is regime-dependent: net+vat only for
+// ordinary domestic VAT. A direct line's gross is the VAT alone, a basis or
+// nondeductible line's is its net, and an unrecognised vatType falls back to
+// net+vat.
+func TestPurchaseGross_RegimeAware(t *testing.T) {
+	cases := []struct {
+		name string
+		doc  string
+		want int64
+	}{
+		{"ordinary domestic", `{"lines":[{"vatType":"HIGH","netPrice":100000,"vat":25000}]}`, 125000},
+		{"reverse-charge basis", `{"lines":[{"vatType":"HIGH_FOREIGN_SERVICE_DEDUCTIBLE","netPrice":200000,"vat":0}]}`, 200000},
+		{"direct: the VAT is the whole invoice line", `{"lines":[{"vatType":"MEDIUM_DIRECT","netPrice":0,"vat":43210}]}`, 43210},
+		{"nondeductible: net is already inclusive, never net−vat", `{"lines":[{"vatType":"HIGH_FOREIGN_SERVICE_NONDEDUCTIBLE","netPrice":125000,"vat":-25000}]}`, 125000},
+		{"zero-rated", `{"lines":[{"vatType":"NONE","netPrice":80000,"vat":0}]}`, 80000},
+		{"unknown type falls back to net+vat", `{"lines":[{"vatType":"HIGH_INVENTED","netPrice":10000,"vat":2500}]}`, 12500},
+		{"mixed lines sum per regime", `{"lines":[{"vatType":"HIGH","netPrice":100000,"vat":25000},{"vatType":"HIGH_DIRECT","netPrice":0,"vat":5000}]}`, 130000},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var doc map[string]json.RawMessage
+			if err := json.Unmarshal([]byte(c.doc), &doc); err != nil {
+				t.Fatalf("bad fixture: %v", err)
+			}
+			if got := purchaseGross(doc); got != c.want {
+				t.Errorf("purchaseGross = %d, want %d", got, c.want)
+			}
+		})
+	}
+}
+
+func TestRollupTotals(t *testing.T) {
+	tests := []struct {
+		name                     string
+		rows                     []rollupRow
+		sales, purchases, margin int64
+	}{
+		{name: "empty"},
+		{
+			name:      "sums both sides and derives margin",
+			rows:      []rollupRow{{SalesOre: 10000, PurchasesOre: 4000}, {SalesOre: 2500, PurchasesOre: 500}},
+			sales:     12500,
+			purchases: 4500,
+			margin:    8000,
+		},
+		{
+			name:      "negative margin",
+			rows:      []rollupRow{{SalesOre: 1000, PurchasesOre: 9000}},
+			sales:     1000,
+			purchases: 9000,
+			margin:    -8000,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s, p, m := rollupTotals(tt.rows)
+			if s != tt.sales || p != tt.purchases || m != tt.margin {
+				t.Fatalf("got (%d, %d, %d), want (%d, %d, %d)", s, p, m, tt.sales, tt.purchases, tt.margin)
+			}
+		})
 	}
 }

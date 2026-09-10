@@ -95,8 +95,68 @@ func TestValidateProposal(t *testing.T) {
 	if !res.OK {
 		t.Error("a VAT rounding discrepancy should be a warning, not an error")
 	}
-	if len(res.Warnings) == 0 {
-		t.Error("expected a vat_rounding warning")
+	if !hasFinding(res.Warnings, "vat_rounding") {
+		t.Errorf("expected a vat_rounding warning, got %+v", res.Warnings)
+	}
+}
+
+func hasFinding(fs []ValidationFinding, code string) bool {
+	for _, f := range fs {
+		if f.Code == code {
+			return true
+		}
+	}
+	return false
+}
+
+// One line per regime through the write path: the regimes whose line vat is
+// structural must not warn when they are right, and must be hard errors when
+// they are wrong.
+func TestValidateLineRegimes(t *testing.T) {
+	cases := []struct {
+		name     string
+		vatType  string
+		net, vat int64
+		wantOK   bool
+		wantCode string // in Errors when !wantOK, in Warnings when wantOK and non-empty
+	}{
+		{name: "ordinary domestic line at rate", vatType: "HIGH", net: 100000, vat: 25000, wantOK: true},
+		{name: "1 øre of rounding is tolerated", vatType: "MEDIUM", net: 3333, vat: 501, wantOK: true},
+		{name: "rate drift warns, never blocks", vatType: "HIGH", net: 100000, vat: 20000, wantOK: true, wantCode: "vat_rounding"},
+		{name: "reverse-charge basis line carries no vat", vatType: "HIGH_FOREIGN_SERVICE_DEDUCTIBLE", net: 200000, vat: 0, wantOK: true},
+		{name: "import basis line carries no vat", vatType: "MEDIUM_BASIS", net: 200000, vat: 0, wantOK: true},
+		{name: "vat on a basis line is an error", vatType: "HIGH_BASIS", net: 200000, vat: 50000, wantOK: false, wantCode: KindBasisHasVAT},
+		{name: "direct line has the vat and no basis", vatType: "HIGH_DIRECT", net: 0, vat: 50000, wantOK: true},
+		{name: "a basis on a direct line is an error", vatType: "MEDIUM_DIRECT", net: 200000, vat: 30000, wantOK: false, wantCode: KindDirectHasNet},
+		{name: "nondeductible line: inclusive net, negative embedded vat", vatType: "HIGH_FOREIGN_SERVICE_NONDEDUCTIBLE", net: 125000, vat: -25000, wantOK: true},
+		{name: "nondeductible with a positive vat is an error", vatType: "HIGH_FOREIGN_SERVICE_NONDEDUCTIBLE", net: 125000, vat: 25000, wantOK: false, wantCode: KindNondeductibleEmbeddedVAT},
+		{name: "zero-rated line carries no vat", vatType: "NONE", net: 200000, vat: 0, wantOK: true},
+		{name: "vat on a zero-rated line is an error", vatType: "NONE_IMPORT_BASIS", net: 200000, vat: 50000, wantOK: false, wantCode: KindZeroRatedHasVAT},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			p := validPurchaseProposal()
+			p.Purchase.Lines[0].VatType = c.vatType
+			p.Purchase.Lines[0].NetPrice = c.net
+			p.Purchase.Lines[0].Vat = c.vat
+			res := ValidateProposal(p, nil)
+			if res.OK != c.wantOK {
+				t.Fatalf("OK = %v, want %v (errors %+v, warnings %+v)", res.OK, c.wantOK, res.Errors, res.Warnings)
+			}
+			if c.wantCode == "" {
+				if len(res.Warnings) != 0 {
+					t.Errorf("a correctly coded %s line must not warn, got %+v", c.vatType, res.Warnings)
+				}
+				return
+			}
+			if c.wantOK {
+				if !hasFinding(res.Warnings, c.wantCode) {
+					t.Errorf("want warning %q, got %+v", c.wantCode, res.Warnings)
+				}
+			} else if !hasFinding(res.Errors, c.wantCode) {
+				t.Errorf("want error %q, got %+v", c.wantCode, res.Errors)
+			}
+		})
 	}
 }
 

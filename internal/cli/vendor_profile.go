@@ -3,7 +3,10 @@
 // HAND-AUTHORED (NOVEL) — fill-in of the generator's verify-friendly stub
 // (skip-if-exists on regen). Profiles how a single vendor (supplier) is usually
 // posted: the modal expense account and VAT type, purchase count, total gross,
-// last date, and the top-3 (account, vatType) combinations by frequency. Reads
+// last date, and the top-3 (account, vatType) combinations by frequency. The
+// two modals are recency-bounded to the 12 months up to the vendor's latest
+// purchase, so a vendor that changed account or VAT regime reads as it is
+// posted today; the top-3 combos stay whole-window, being descriptive. Reads
 // only the local mirror.
 package cli
 
@@ -15,9 +18,14 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 )
+
+// vendorProfileWindowMonths bounds the modal account/VAT type to the vendor's
+// most recent 12 months of purchases inside the profiled window.
+const vendorProfileWindowMonths = 12
 
 type vendorCombo struct {
 	Account string `json:"account"`
@@ -26,16 +34,19 @@ type vendorCombo struct {
 }
 
 type vendorProfileReport struct {
-	Company       string        `json:"company"`
-	ContactID     int64         `json:"contact_id"`
-	ContactName   string        `json:"contact_name,omitempty"`
-	PurchaseCount int           `json:"purchase_count"`
-	TotalOre      int64         `json:"total_ore"`
-	Total         string        `json:"total"`
-	LastDate      string        `json:"last_date,omitempty"`
-	ModalAccount  string        `json:"modal_account,omitempty"`
-	ModalVATType  string        `json:"modal_vat_type,omitempty"`
-	Combos        []vendorCombo `json:"combos"`
+	Company           string        `json:"company"`
+	ContactID         int64         `json:"contact_id"`
+	ContactName       string        `json:"contact_name,omitempty"`
+	Window            Window        `json:"window"`
+	UndatedDocuments  int           `json:"undated_documents"`
+	PurchaseCount     int           `json:"purchase_count"`
+	TotalOre          int64         `json:"total_ore"`
+	Total             string        `json:"total"`
+	LastDate          string        `json:"last_date,omitempty"`
+	ModalAccount      string        `json:"modal_account,omitempty"`
+	ModalVATType      string        `json:"modal_vat_type,omitempty"`
+	ModalWindowMonths int           `json:"modal_window_months"`
+	Combos            []vendorCombo `json:"combos"`
 }
 
 // vendorProfilePurchase is the minimal per-purchase shape the aggregator needs.
@@ -53,10 +64,12 @@ type vendorProfileLine struct {
 // buildVendorProfile is the pure aggregator over a single vendor's purchases.
 // It returns the count, total gross øre, last date, modal account, modal
 // vatType, and the top-3 (account,vatType) combos by frequency (ties broken
-// deterministically by account then vatType).
+// deterministically by account then vatType). The two modals cover only the 12
+// months up to (and including) the vendor's latest purchase — recentModal's
+// window is exclusive of `at`, so `at` is the day after that latest date. The
+// combos remain whole-window frequencies.
 func buildVendorProfile(purchases []vendorProfilePurchase) (count int, totalOre int64, lastDate, modalAccount, modalVAT string, combos []vendorCombo) {
-	acctCounts := map[string]int{}
-	vatCounts := map[string]int{}
+	var acctObs, vatObs []dated
 	comboCounts := map[vendorCombo]int{}
 	count = len(purchases)
 	for _, p := range purchases {
@@ -65,17 +78,16 @@ func buildVendorProfile(purchases []vendorProfilePurchase) (count int, totalOre 
 			lastDate = p.Date
 		}
 		for _, ln := range p.Lines {
-			if ln.Account != "" {
-				acctCounts[ln.Account]++
-			}
-			if ln.VATType != "" {
-				vatCounts[ln.VATType]++
-			}
+			acctObs = append(acctObs, dated{Date: p.Date, Value: ln.Account})
+			vatObs = append(vatObs, dated{Date: p.Date, Value: ln.VATType})
 			comboCounts[vendorCombo{Account: ln.Account, VATType: ln.VATType}]++
 		}
 	}
-	modalAccount = modalKey(acctCounts)
-	modalVAT = modalKey(vatCounts)
+	if at, err := time.Parse("2006-01-02", lastDate); err == nil {
+		day := at.AddDate(0, 0, 1).Format("2006-01-02")
+		modalAccount, _ = recentModal(acctObs, day, vendorProfileWindowMonths)
+		modalVAT, _ = recentModal(vatObs, day, vendorProfileWindowMonths)
+	}
 
 	combos = make([]vendorCombo, 0, len(comboCounts))
 	for c, n := range comboCounts {
@@ -97,22 +109,10 @@ func buildVendorProfile(purchases []vendorProfilePurchase) (count int, totalOre 
 	return count, totalOre, lastDate, modalAccount, modalVAT, combos
 }
 
-// modalKey returns the most frequent key, ties broken by lexicographically
-// smallest key. Empty map yields "".
-func modalKey(counts map[string]int) string {
-	best := ""
-	bestN := 0
-	for k, n := range counts {
-		if n > bestN || (n == bestN && (best == "" || k < best)) {
-			best, bestN = k, n
-		}
-	}
-	return best
-}
-
 func newNovelVendorProfileCmd(flags *rootFlags) *cobra.Command {
 	var flagCompany string
 	var flagContact string
+	var flagPeriod string
 	var dbPath string
 
 	cmd := &cobra.Command{
@@ -121,9 +121,11 @@ func newNovelVendorProfileCmd(flags *rootFlags) *cobra.Command {
 		Long: "Aggregates one supplier's purchase history: the modal expense account and VAT type,\n" +
 			"purchase count, total gross, last purchase date, and the top-3 (account, VAT type)\n" +
 			"combinations by frequency. Identify the vendor by positional contactId or --contact.\n" +
-			"Reads the local mirror.",
+			"--period scopes which purchases are profiled and defaults to the current year; pass\n" +
+			"`all` to profile the whole history. Reads the local mirror.",
 		Example: strings.Trim(`
   fiken-cli vendor-profile 123 --company fiken-demo
+  fiken-cli vendor-profile 123 --company fiken-demo --period all
   fiken-cli vendor-profile --contact 123 --company fiken-demo --agent`, "\n"),
 		Annotations: map[string]string{"mcp:read-only": "true"},
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -152,13 +154,17 @@ func newNovelVendorProfileCmd(flags *rootFlags) *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("contactId must be an integer, got %q", raw)
 			}
+			win, err := resolvePeriod(flagPeriod)
+			if err != nil {
+				return err
+			}
 			if dryRunOK(flags) {
 				// Preview the read the command would perform; emitting a line
 				// (rather than silently returning) keeps --dry-run informative
 				// and gives the verify harness probe output to match.
 				fmt.Fprintf(cmd.OutOrStdout(),
-					"would profile vendor contact %d from the local mirror (purchases, modal account/VAT, top combos)\n",
-					contactID)
+					"would profile vendor contact %d over %s from the local mirror (purchases, modal account/VAT, top combos)\n",
+					contactID, win.String())
 				return nil
 			}
 			db, err := openMirror(cmd.Context(), dbPath)
@@ -177,6 +183,9 @@ func newNovelVendorProfileCmd(flags *rootFlags) *cobra.Command {
 			}
 			var mine []vendorProfilePurchase
 			var contactName string
+			// A purchase with no date cannot be placed in any window, so it is
+			// excluded always and counted instead of silently vanishing.
+			undated := 0
 			for _, p := range purchases {
 				var sid int64
 				if raw, ok := p["supplier"]; ok {
@@ -191,6 +200,14 @@ func newNovelVendorProfileCmd(flags *rootFlags) *cobra.Command {
 				if sid != contactID {
 					continue
 				}
+				date := jsonStr(p, "date")
+				if date == "" {
+					undated++
+					continue
+				}
+				if !win.Contains(date) {
+					continue
+				}
 				var gross int64
 				var lines []vendorProfileLine
 				for _, ln := range jsonObjects(p, "lines") {
@@ -203,7 +220,7 @@ func newNovelVendorProfileCmd(flags *rootFlags) *cobra.Command {
 					})
 				}
 				mine = append(mine, vendorProfilePurchase{
-					Date: jsonStr(p, "date"), GrossOre: gross, Lines: lines,
+					Date: date, GrossOre: gross, Lines: lines,
 				})
 			}
 			// Fall back to the contacts mirror for a name if no purchase named the supplier.
@@ -220,22 +237,29 @@ func newNovelVendorProfileCmd(flags *rootFlags) *cobra.Command {
 
 			count, totalOre, lastDate, modalAccount, modalVAT, combos := buildVendorProfile(mine)
 			report := vendorProfileReport{
-				Company:       slug,
-				ContactID:     contactID,
-				ContactName:   contactName,
-				PurchaseCount: count,
-				TotalOre:      totalOre,
-				Total:         kr(totalOre),
-				LastDate:      lastDate,
-				ModalAccount:  modalAccount,
-				ModalVATType:  modalVAT,
-				Combos:        combos,
+				Company:           slug,
+				ContactID:         contactID,
+				ContactName:       contactName,
+				Window:            win,
+				UndatedDocuments:  undated,
+				PurchaseCount:     count,
+				TotalOre:          totalOre,
+				Total:             kr(totalOre),
+				LastDate:          lastDate,
+				ModalAccount:      modalAccount,
+				ModalVATType:      modalVAT,
+				ModalWindowMonths: vendorProfileWindowMonths,
+				Combos:            combos,
 			}
 			return emitFiken(cmd, flags, report, func() {
 				w := cmd.OutOrStdout()
-				fmt.Fprintf(w, "Vendor profile: %s (contact %d) in %s\n\n", orNone(report.ContactName), report.ContactID, report.Company)
+				fmt.Fprintf(w, "Vendor profile: %s (contact %d) in %s (%s)\n\n",
+					orNone(report.ContactName), report.ContactID, report.Company, report.Window.String())
 				if report.PurchaseCount == 0 {
-					fmt.Fprintln(w, "No purchases recorded for this vendor in the mirror.")
+					fmt.Fprintln(w, "No purchases recorded for this vendor in the mirror for that period.")
+					if report.UndatedDocuments > 0 {
+						fmt.Fprintf(w, "%d undated purchase(s) skipped.\n", report.UndatedDocuments)
+					}
 					return
 				}
 				fmt.Fprintf(w, "  purchases:    %d\n", report.PurchaseCount)
@@ -243,6 +267,9 @@ func newNovelVendorProfileCmd(flags *rootFlags) *cobra.Command {
 				fmt.Fprintf(w, "  last date:    %s\n", orNone(report.LastDate))
 				fmt.Fprintf(w, "  modal acct:   %s\n", orNone(report.ModalAccount))
 				fmt.Fprintf(w, "  modal vat:    %s\n", orNone(report.ModalVATType))
+				if report.UndatedDocuments > 0 {
+					fmt.Fprintf(w, "  undated:      %d purchase(s) skipped\n", report.UndatedDocuments)
+				}
 				if len(report.Combos) > 0 {
 					fmt.Fprintln(w, "  top combos:")
 					for _, c := range report.Combos {
@@ -254,6 +281,7 @@ func newNovelVendorProfileCmd(flags *rootFlags) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&flagCompany, "company", "", "Company slug (default: the single synced company)")
 	cmd.Flags().StringVar(&flagContact, "contact", "", "Vendor contact id (alternative to the positional argument)")
+	cmd.Flags().StringVar(&flagPeriod, "period", "", "Period: YYYY, YYYY-MM, YYYY-Qn, from:to, or all (default: current year)")
 	cmd.Flags().StringVar(&dbPath, "db", "", "Mirror database path (default: ~/.local/share/fiken-cli/data.db)")
 	return cmd
 }

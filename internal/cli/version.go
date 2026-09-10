@@ -9,8 +9,13 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// version is the printed CLI's version, overridable at build time via ldflags.
-var version = "1.0.0"
+// version is the printed CLI's version, overridable at build time via ldflags
+// (.goreleaser.yaml injects -X fiken-cli/internal/cli.version).
+//
+// PATCH(release-2-0-0): 2.0.0 — the report envelope, period defaults and the
+// guarded-write exit code are breaking changes; see CHANGELOG.md. A reprint
+// resets this literal to the generator default.
+var version = "2.0.0"
 
 // newVersionCmd prints the CLI name and version. Shared by the HTTP and device
 // generators so both printed-CLI shapes carry an identical version command.

@@ -899,6 +899,13 @@ func (s *Store) upsertGenericResourceTx(tx *sql.Tx, resourceType, id string, dat
 }
 
 func (s *Store) Upsert(resourceType, id string, data json.RawMessage) error {
+	// PATCH(mirror-canonical-resource-name): one spelling reaches storage.
+	canonicalResource, err := CanonicalResource(resourceType)
+	if err != nil {
+		return err
+	}
+	resourceType = canonicalResource
+
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	tx, err := s.db.Begin()
@@ -1289,7 +1296,7 @@ func (s *Store) UpsertBankAccounts(data json.RawMessage) error {
 	if id == "" {
 		return fmt.Errorf("missing id for bank_accounts")
 	}
-	storageID := resourceStorageID("bank-accounts", id, obj)
+	storageID := resourceStorageID("bank_accounts", id, obj)
 
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
@@ -1299,7 +1306,7 @@ func (s *Store) UpsertBankAccounts(data json.RawMessage) error {
 	}
 	defer tx.Rollback()
 
-	if err := s.upsertGenericResourceTx(tx, "bank-accounts", storageID, data); err != nil {
+	if err := s.upsertGenericResourceTx(tx, "bank_accounts", storageID, data); err != nil {
 		return err
 	}
 	if err := s.upsertBankAccountsTx(tx, storageID, obj, data); err != nil {
@@ -1601,7 +1608,7 @@ func (s *Store) UpsertJournalEntries(data json.RawMessage) error {
 	if id == "" {
 		return fmt.Errorf("missing id for journal_entries")
 	}
-	storageID := resourceStorageID("journal-entries", id, obj)
+	storageID := resourceStorageID("journal_entries", id, obj)
 
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
@@ -1611,7 +1618,7 @@ func (s *Store) UpsertJournalEntries(data json.RawMessage) error {
 	}
 	defer tx.Rollback()
 
-	if err := s.upsertGenericResourceTx(tx, "journal-entries", storageID, data); err != nil {
+	if err := s.upsertGenericResourceTx(tx, "journal_entries", storageID, data); err != nil {
 		return err
 	}
 	if err := s.upsertJournalEntriesTx(tx, storageID, obj, data); err != nil {
@@ -2490,13 +2497,13 @@ var genericIDFieldFallbacks = []string{"id", "ID", "gid", "sid", "uid", "uuid", 
 // child's bare id and silently keep only the last synced parent.
 var resourceParentKeyColumns = map[string]string{
 	"accounts":                    "parent_id",
-	"bank-accounts":               "parent_id",
+	"bank_accounts":               "parent_id",
 	"contacts":                    "parent_id",
 	"contacts_attachments":        "contacts_id",
 	"contact_person":              "contacts_id",
 	"inbox":                       "parent_id",
 	"invoices_attachments":        "invoices_id",
-	"journal-entries":             "parent_id",
+	"journal_entries":             "parent_id",
 	"journal_entries_attachments": "journal_entries_id",
 	"create_invoice_draft":        "order_confirmations_id",
 	"products":                    "parent_id",
@@ -2638,6 +2645,14 @@ func scalarIDString(value any) string {
 }
 
 func resourceStorageID(resourceType, id string, obj map[string]any) string {
+	// PATCH(mirror-canonical-resource-name): resourceParentKeyColumns is keyed by
+	// the canonical (snake) spelling. A kebab caller used to miss the map and get a
+	// BARE storage key, colliding two companies' rows on the resources primary key.
+	// This function cannot return an error, so an unknown name keeps its old
+	// behaviour; the callers that matter (Upsert, UpsertBatch) reject it first.
+	if canonical, cerr := CanonicalResource(resourceType); cerr == nil {
+		resourceType = canonical
+	}
 	parentKey := resourceParentKeyColumns[resourceType]
 	if parentKey == "" {
 		return id
@@ -2671,6 +2686,16 @@ func resourceStorageID(resourceType, id string, obj map[string]any) string {
 // downstream typed table is misconfigured. Failures are surfaced via a
 // trailing stderr warning rather than aborting the batch.
 func (s *Store) UpsertBatch(resourceType string, items []json.RawMessage) (int, int, error) {
+	// PATCH(mirror-canonical-resource-name): canonicalise before anything keys on
+	// the name — the typed-table dispatch below, resourceParentKeyColumns via
+	// resourceStorageID, resourceIDFieldOverrides via ExtractResourceID and the
+	// resource_type column all have to agree on one spelling.
+	canonicalResource, err := CanonicalResource(resourceType)
+	if err != nil {
+		return 0, 0, err
+	}
+	resourceType = canonicalResource
+
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	tx, err := s.db.Begin()
@@ -2715,7 +2740,7 @@ func (s *Store) UpsertBatch(resourceType string, items []json.RawMessage) (int, 
 		switch resourceType {
 		case "accounts":
 			typedErr = s.upsertAccountsTx(tx, storageID, obj, item)
-		case "bank-accounts":
+		case "bank_accounts":
 			typedErr = s.upsertBankAccountsTx(tx, storageID, obj, item)
 		case "contacts":
 			typedErr = s.upsertContactsTx(tx, storageID, obj, item)
@@ -2727,7 +2752,7 @@ func (s *Store) UpsertBatch(resourceType string, items []json.RawMessage) (int, 
 			typedErr = s.upsertInboxTx(tx, storageID, obj, item)
 		case "invoices_attachments":
 			typedErr = s.upsertInvoicesAttachmentsTx(tx, storageID, obj, item)
-		case "journal-entries":
+		case "journal_entries":
 			typedErr = s.upsertJournalEntriesTx(tx, storageID, obj, item)
 		case "journal_entries_attachments":
 			typedErr = s.upsertJournalEntriesAttachmentsTx(tx, storageID, obj, item)
@@ -2761,6 +2786,16 @@ func (s *Store) UpsertBatch(resourceType string, items []json.RawMessage) (int, 
 			typedErr = s.upsertTransactionsTx(tx, storageID, obj, item)
 		case "transactions_delete":
 			typedErr = s.upsertTransactionsDeleteTx(tx, storageID, obj, item)
+		default:
+			// PATCH(mirror-canonical-resource-name): a canonical name that owns a
+			// typed table and still lands here is a dispatch bug (issue #6) — the
+			// generated switch had no default at all, so the miss was silent and
+			// the typed table simply stayed empty. Generic-only names fall through
+			// to the generic row written above, which is their whole storage model.
+			if HasTypedTable(resourceType) {
+				return stored, extractFailures, fmt.Errorf(
+					"no typed-table dispatch for %q although a typed table exists; UpsertBatch's switch is out of step with resource_name.go", resourceType)
+			}
 		}
 
 		if typedErr != nil {

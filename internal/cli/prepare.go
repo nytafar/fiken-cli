@@ -17,6 +17,8 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+
+	"fiken-cli/internal/fikencore"
 )
 
 type prepareSupplier struct {
@@ -71,7 +73,7 @@ func newNovelPrepareCmd(flags *rootFlags) *cobra.Command {
 				return err
 			}
 
-			rep := prepareReport{Company: slug, PurchaseVatTypes: purchaseVatTypeList()}
+			rep := prepareReport{Company: slug, PurchaseVatTypes: fikencore.TypesFor(fikencore.SidePurchases)}
 
 			var inboxID string
 			if len(args) > 0 {
@@ -149,11 +151,6 @@ func newNovelPrepareCmd(flags *rootFlags) *cobra.Command {
 	return cmd
 }
 
-func purchaseVatTypeList() []string {
-	return []string{"NONE", "HIGH", "MEDIUM", "LOW", "RAW_FISH", "HIGH_DIRECT", "HIGH_BASIS",
-		"MEDIUM_DIRECT", "MEDIUM_BASIS", "NONE_IMPORT_BASIS"}
-}
-
 func isCostAccount(code string) bool {
 	if code == "" {
 		return false
@@ -166,8 +163,8 @@ func recentSuppliers(purchases []map[string]json.RawMessage) []prepareSupplier {
 	type agg struct {
 		name     string
 		count    int
-		accounts map[string]int
-		vatTypes map[string]int
+		accounts []dated
+		vatTypes []dated
 	}
 	by := map[int64]*agg{}
 	for _, p := range purchases {
@@ -181,24 +178,33 @@ func recentSuppliers(purchases []map[string]json.RawMessage) []prepareSupplier {
 		}
 		a := by[cid]
 		if a == nil {
-			a = &agg{name: jsonStr(sup, "name"), accounts: map[string]int{}, vatTypes: map[string]int{}}
+			a = &agg{name: jsonStr(sup, "name")}
 			by[cid] = a
 		}
 		a.count++
+		date := jsonStr(p, "date")
 		for _, ln := range jsonObjects(p, "lines") {
-			if acct := jsonStr(ln, "account"); acct != "" {
-				a.accounts[acct]++
-			}
-			if vt := jsonStr(ln, "vatType"); vt != "" {
-				a.vatTypes[vt]++
-			}
+			a.accounts = append(a.accounts, dated{Date: date, Value: jsonStr(ln, "account")})
+			a.vatTypes = append(a.vatTypes, dated{Date: date, Value: jsonStr(ln, "vatType")})
 		}
+	}
+	// Propose the vendor's CURRENT practice: the modal over their last 12
+	// months. Only when that window is empty (a vendor not seen for a year, or
+	// undated purchases) fall back to the whole-history modal — months <= 0 —
+	// so prepare still proposes something for a long-dormant supplier.
+	today := nowFunc().Format("2006-01-02")
+	modal := func(obs []dated) string {
+		v, n := recentModal(obs, today, 12)
+		if n == 0 {
+			v, _ = recentModal(obs, today, 0)
+		}
+		return v
 	}
 	var out []prepareSupplier
 	for cid, a := range by {
 		out = append(out, prepareSupplier{
 			ContactID: cid, Name: a.name, PurchaseN: a.count,
-			ModalAccount: topKey(a.accounts), ModalVatType: topKey(a.vatTypes),
+			ModalAccount: modal(a.accounts), ModalVatType: modal(a.vatTypes),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].PurchaseN > out[j].PurchaseN })

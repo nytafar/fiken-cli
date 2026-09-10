@@ -2,7 +2,7 @@
 //
 // HAND-AUTHORED (NOVEL) — fill-in of the generator's verify-friendly stub
 // (skip-if-exists on regen). Lists purchases and journal entries in a period
-// whose `attachments` array is absent or empty — the documents missing a
+// whose attachment array is absent or empty — the documents missing a
 // bilag. Reads only the local mirror.
 package cli
 
@@ -10,49 +10,66 @@ package cli
 
 import (
 	"encoding/json"
-	"fmt"
-	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
 )
 
-type missingBilagItem struct {
-	DocType     string `json:"doc_type"` // purchase | journal_entry
-	DocID       int64  `json:"doc_id"`
-	Date        string `json:"date"`
-	Description string `json:"description,omitempty"`
+// attachmentsField maps a mirror resource type to the field name the Fiken API
+// actually uses for its attachment array. The field is NOT called "attachments"
+// everywhere: spec.yaml names it purchaseAttachments on purchaseResult (~6647)
+// and saleAttachments on saleResult (~6852); only journalEntry (~5941) uses the
+// bare "attachments". Reading the wrong key made every purchase look
+// undocumented, so keep this table aligned with the spec.
+var attachmentsField = map[string]string{
+	"purchases":       "purchaseAttachments",
+	"sales":           "saleAttachments",
+	"journal_entries": "attachments",
 }
 
-type missingBilagReport struct {
-	Company      string             `json:"company"`
-	Period       string             `json:"period,omitempty"`
-	TotalMissing int                `json:"total_missing"`
-	Missing      []missingBilagItem `json:"missing"`
+// hasAttachments reports whether a decoded document of the given mirror
+// resource type carries a non-empty attachment array. An unknown resource type
+// falls back to the bare "attachments" spelling.
+func hasAttachments(resourceType string, m map[string]json.RawMessage) bool {
+	field, ok := attachmentsField[resourceType]
+	if !ok {
+		field = "attachments"
+	}
+	return len(jsonObjects(m, field)) > 0
 }
 
-// hasAttachments reports whether a decoded document carries a non-empty
-// attachments array.
-func hasAttachments(m map[string]json.RawMessage) bool {
-	return len(jsonObjects(m, "attachments")) > 0
+// journalEntryImpact approximates the size of a journal entry: the sum of its
+// positive line amounts, i.e. one side of a balanced entry. Journal lines carry
+// a signed amount with no debit/credit direction, so this is the only honest
+// magnitude available from the mirror.
+func journalEntryImpact(e map[string]json.RawMessage) int64 {
+	var sum int64
+	for _, ln := range jsonObjects(e, "lines") {
+		if amt, _ := jsonInt(ln, "amount"); amt > 0 {
+			sum += amt
+		}
+	}
+	return sum
 }
 
 func newNovelMissingBilagCmd(flags *rootFlags) *cobra.Command {
 	var flagCompany string
-	var flagPeriod string
 	var dbPath string
+	var opts reportOpts
 
 	cmd := &cobra.Command{
 		Use:   "missing-bilag",
 		Short: "List purchases and journal entries with no attached documentation",
 		Long: "Scans purchases and journal entries in a period and reports any whose attachments array\n" +
-			"is absent or empty — the documents missing a bilag (receipt/voucher). Reads the local mirror.",
+			"is absent or empty — the documents missing a bilag (receipt/voucher). Each finding carries\n" +
+			"the document's amount as its impact, so the biggest undocumented postings sort first.\n" +
+			"Reads the local mirror.",
 		Example: strings.Trim(`
   fiken-cli missing-bilag --company fiken-demo
   fiken-cli missing-bilag --company fiken-demo --period 2026-05 --agent`, "\n"),
 		Annotations: map[string]string{"mcp:read-only": "true"},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			from, to, err := parsePeriod(flagPeriod)
+			win, err := resolvePeriod(opts.period)
 			if err != nil {
 				return err
 			}
@@ -69,34 +86,43 @@ func newNovelMissingBilagCmd(flags *rootFlags) *cobra.Command {
 				return err
 			}
 
-			inPeriod := func(date string) bool {
-				if date == "" {
-					return false
-				}
-				if from != "" && date < from {
-					return false
-				}
-				if to != "" && date > to {
-					return false
-				}
-				return true
-			}
-
-			var missing []missingBilagItem
+			var findings []Finding
+			undated := 0
 			purchases, err := loadCompanyResources(cmd.Context(), db, "purchases", slug)
 			if err != nil {
 				return err
 			}
 			for _, p := range purchases {
 				date := jsonStr(p, "date")
-				if !inPeriod(date) || hasAttachments(p) {
+				if date == "" {
+					undated++
+					continue
+				}
+				if !win.Contains(date) || hasAttachments("purchases", p) {
 					continue
 				}
 				id, _ := jsonInt(p, "purchaseId")
-				missing = append(missing, missingBilagItem{
-					DocType: "purchase", DocID: id, Date: date,
+				var contactID int64
+				var contactName string
+				if sup := jsonObject(p, "supplier"); sup != nil {
+					contactID, _ = jsonInt(sup, "contactId")
+					contactName = jsonStr(sup, "name")
+				}
+				f := Finding{
+					Kind:        "missing_attachment",
+					Severity:    SeverityInfo,
+					DocType:     "purchase",
+					DocID:       id,
+					Date:        date,
+					ContactID:   contactID,
+					ContactName: contactName,
 					Description: jsonStr(p, "kind"),
-				})
+					ImpactOre:   purchaseGross(p),
+				}
+				if ident := jsonStr(p, "identifier"); ident != "" {
+					f.Detail = map[string]any{"identifier": ident}
+				}
+				findings = append(findings, f)
 			}
 			entries, err := loadCompanyResources(cmd.Context(), db, "journal_entries", slug)
 			if err != nil {
@@ -104,49 +130,39 @@ func newNovelMissingBilagCmd(flags *rootFlags) *cobra.Command {
 			}
 			for _, e := range entries {
 				date := jsonStr(e, "date")
-				if !inPeriod(date) || hasAttachments(e) {
+				if date == "" {
+					undated++
+					continue
+				}
+				if !win.Contains(date) || hasAttachments("journal_entries", e) {
 					continue
 				}
 				id, _ := jsonInt(e, "journalEntryId")
-				missing = append(missing, missingBilagItem{
-					DocType: "journal_entry", DocID: id, Date: date,
+				findings = append(findings, Finding{
+					Kind:        "missing_attachment",
+					Severity:    SeverityInfo,
+					DocType:     "journal_entry",
+					DocID:       id,
+					Date:        date,
 					Description: jsonStr(e, "description"),
+					ImpactOre:   journalEntryImpact(e),
 				})
 			}
 
-			sort.SliceStable(missing, func(i, j int) bool {
-				if missing[i].Date != missing[j].Date {
-					return missing[i].Date < missing[j].Date
-				}
-				return missing[i].DocType < missing[j].DocType
-			})
-
-			report := missingBilagReport{
-				Company:      slug,
-				Period:       flagPeriod,
-				TotalMissing: len(missing),
-				Missing:      missing,
+			report := Report{
+				Company:  slug,
+				Detector: "missing_bilag",
+				Window:   win,
+				Undated:  undated,
 			}
-			return emitFiken(cmd, flags, report, func() {
-				w := cmd.OutOrStdout()
-				fmt.Fprintf(w, "Documents missing a bilag for %s", report.Company)
-				if report.Period != "" {
-					fmt.Fprintf(w, " (%s)", report.Period)
-				}
-				fmt.Fprintf(w, "\n\n")
-				if len(report.Missing) == 0 {
-					fmt.Fprintln(w, "Every purchase and journal entry has an attachment.")
-					return
-				}
-				for _, m := range report.Missing {
-					fmt.Fprintf(w, "%-14s #%-8d %s  %s\n", m.DocType, m.DocID, m.Date, m.Description)
-				}
-				fmt.Fprintf(w, "\nTotal missing bilag: %d\n", report.TotalMissing)
-			})
+			keyFn := func(f Finding) map[string]string {
+				return map[string]string{"doc_type": f.DocType}
+			}
+			return finishReport(cmd, flags, report, findings, keyFn, opts)
 		},
 	}
 	cmd.Flags().StringVar(&flagCompany, "company", "", "Company slug (default: the single synced company)")
-	cmd.Flags().StringVar(&flagPeriod, "period", "", "Period to scan: YYYY, YYYY-MM, YYYY-Qn, or from:to (default: all)")
 	cmd.Flags().StringVar(&dbPath, "db", "", "Mirror database path (default: ~/.local/share/fiken-cli/data.db)")
+	addReportFlags(cmd, &opts)
 	return cmd
 }

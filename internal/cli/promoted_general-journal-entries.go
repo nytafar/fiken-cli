@@ -83,7 +83,9 @@ func newGeneralJournalEntriesPromotedCmd(flags *rootFlags) *cobra.Command {
 				partialFailure = detectPartialFailure(data)
 			}
 			if !flags.dryRun && statusCode >= 200 && statusCode < 300 && (partialFailure == nil || flags.allowPartialFailure) {
-				writeMutationResponseToStore(cmd.Context(), "general-journal-entries", data, "")
+				// PATCH(mutation-cache-parent-id): request path threaded in so the cached
+				// mutation row is stamped with parent_id and keyed per company.
+				writeMutationResponseToStore(cmd.Context(), "general-journal-entries", data, "", path)
 			}
 			// Print provenance to stderr for human-facing output only.
 			// Machine-format flags (--json, --csv, --compact, --quiet, --plain,

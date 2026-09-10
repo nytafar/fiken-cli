@@ -1,3 +1,8 @@
+> Machine-readable records for the four patches below: `oauth-token-endpoint-http-basic.json`,
+> `auth-setup-registration-path.json`, `auth-login-redirect-uri.json`,
+> `auth-login-callback-timeout.json` in this directory. Those are what the regen/validate
+> tooling reads (it only loads `*.json`); this file is the human explanation. Keep both in sync.
+
 # OAuth token endpoint uses HTTP Basic client authentication
 
 **Files:** `internal/cli/auth.go` (`runOAuthLogin`), `internal/client/client.go` (`refreshAccessToken`)

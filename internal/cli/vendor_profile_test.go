@@ -55,15 +55,36 @@ func TestBuildVendorProfile_TopThreeCap(t *testing.T) {
 	}
 }
 
-func TestModalKey(t *testing.T) {
-	if got := modalKey(nil); got != "" {
-		t.Errorf("modalKey(nil) = %q, want empty", got)
+func TestBuildVendorProfile_ModalIsRecencyBounded(t *testing.T) {
+	// Three old purchases on 6300:1/HIGH and two recent ones on 7140:1/NONE:
+	// the modals follow the recent practice, while the descriptive top-3 combos
+	// still rank the whole window.
+	purchases := []vendorProfilePurchase{
+		{Date: "2023-01-01", GrossOre: 1, Lines: []vendorProfileLine{{Account: "6300:1", VATType: "HIGH"}}},
+		{Date: "2023-06-01", GrossOre: 1, Lines: []vendorProfileLine{{Account: "6300:1", VATType: "HIGH"}}},
+		{Date: "2023-09-01", GrossOre: 1, Lines: []vendorProfileLine{{Account: "6300:1", VATType: "HIGH"}}},
+		{Date: "2026-02-01", GrossOre: 1, Lines: []vendorProfileLine{{Account: "7140:1", VATType: "NONE"}}},
+		{Date: "2026-05-01", GrossOre: 1, Lines: []vendorProfileLine{{Account: "7140:1", VATType: "NONE"}}},
 	}
-	if got := modalKey(map[string]int{"x": 1, "y": 3}); got != "y" {
-		t.Errorf("modalKey = %q, want y", got)
+	_, _, last, acct, vat, combos := buildVendorProfile(purchases)
+	if last != "2026-05-01" {
+		t.Fatalf("lastDate = %q, want 2026-05-01", last)
 	}
-	// Tie -> lexicographically smallest.
-	if got := modalKey(map[string]int{"b": 2, "a": 2}); got != "a" {
-		t.Errorf("tie modalKey = %q, want a", got)
+	if acct != "7140:1" || vat != "NONE" {
+		t.Errorf("modals = %q/%q; want 7140:1/NONE (12 months up to the last purchase)", acct, vat)
+	}
+	if len(combos) != 2 || combos[0].Account != "6300:1" || combos[0].Count != 3 {
+		t.Errorf("combos = %+v; want the whole-window ranking led by 6300:1 ×3", combos)
+	}
+}
+
+func TestBuildVendorProfile_ModalIncludesTheLatestPurchase(t *testing.T) {
+	// `at` is the day after the last purchase, so that purchase votes too.
+	purchases := []vendorProfilePurchase{
+		{Date: "2026-05-01", GrossOre: 1, Lines: []vendorProfileLine{{Account: "7140:1", VATType: "NONE"}}},
+	}
+	_, _, _, acct, vat, _ := buildVendorProfile(purchases)
+	if acct != "7140:1" || vat != "NONE" {
+		t.Errorf("modals = %q/%q; want 7140:1/NONE", acct, vat)
 	}
 }

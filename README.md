@@ -16,10 +16,10 @@ The write path is not disposable. It touches real books, so it's hand-built arou
 The surface no Fiken tool has, built around bankavstemming — the most-cited Fiken pain there is — all read-only and answered from the local mirror:
 
 - **bank-unverified** — ledger-vs-reconciled-balance gaps and postings dated after the reconciled point: *which accounts have drifted and need a session.*
-- **drift** — debit≠credit imbalances and sub-krone øre-rounding drift, exact integer-øre.
+- **drift** — sub-krone øre-rounding drift, header-vs-lines totals and VAT-regime breaches, exact integer-øre.
 - **vat-anomaly** — MVA codes implausible for the account, or off the vendor's usual pattern.
 - **duplicates** — same vendor + øre amount within N days.
-- **missing-bilag** — postings with no attached documentation.
+- **missing-bilag** — purchases and journal entries with no attached documentation, ranked by amount.
 
 `bank-unverified` is the API-side health signal — it tells you where to look. The line-by-line matching itself runs through the browser **Superføring** workflow, which uses this CLI's idempotent `commit` and records into its audit log. The CLI owns the books-side correctness; the browser harness owns the bank-line UI.
 
@@ -62,6 +62,8 @@ go install ./cmd/fiken-cli
 ```
 
 Verify with `fiken-cli --version`. If it's not found, add `$(go env GOPATH)/bin` to your `$PATH`.
+
+`make check` is the gate for changes to this tree: `go vet ./...`, `go test ./...`, and `scripts/check-boundaries.sh` — which enforces the generated-vs-hand-authored marker on every `.go` file, the `vatType` prefix-match lint, the `.printing-press-patches/` ledger, and the doc claims this README makes about `drift` and `rollup`. Run it before every commit.
 
 ### Agent skill
 
@@ -155,6 +157,12 @@ How the auth works:
 
 Default auth is a personal API token (Settings -> API -> Personlige API-nokler in Fiken), set as FIKEN_API_TOKEN and sent as a Bearer token — the ToS-clean path for your own companies, with no expiry. For acting on behalf of other companies, OAuth2 authorization-code login is wired for FIKEN_CLIENT_ID/FIKEN_CLIENT_SECRET via 'fiken-cli auth login' (opens a browser). Fiken allows only one concurrent request per token, so all calls are serialized through a single-flight lock and a serial, resumable sync.
 
+## Write guard: test companies and live mode
+
+Every mutating request is refused unless the mirrored company record has `testCompany: true`. A refusal exits **8** with a JSON error naming the company slug and a reason code — `not_test_company`, `company_unknown` (the slug is not in the local mirror yet), or `guard_unconfigured` (the fail-closed default when a code path never wired the guard). Nothing is sent to Fiken.
+
+Writing to real books requires live mode, reached only by `FIKEN_MODE` set to `live` in an untracked env file (`.env.local` or `.env` in the working directory, or `~/.config/fiken-cli/env`) or in the process environment. **There is deliberately no CLI flag**, and `--agent` forces test mode regardless, so an agent cannot put itself into live mode. Every refusal is appended to the audit log.
+
 ## Quick Start
 
 ```bash
@@ -170,10 +178,18 @@ fiken-cli sync
 # the headline question: what isn't matched to the bank yet?
 fiken-cli bank-unverified --company fiken-demo --as-of 2026-05-31
 
-# find imbalanced or rounding-off entries before MVA
+# find rounding-off or mis-coded entries before MVA (no --period = the current calendar year)
 fiken-cli drift --company fiken-demo --period 2026-05
 
 ```
+
+After upgrading past the mirror-key fix, refresh the two resources that were stored under stale keys, once per company:
+
+```bash
+fiken-cli sync --full --company <slug> --resources journal_entries,bank_accounts
+```
+
+`fiken-cli doctor` names any company still holding stale rows.
 
 ## Unique Features
 
@@ -187,14 +203,14 @@ These capabilities aren't available in any other tool for this API.
   ```bash
   fiken-cli bank-unverified --company fiken-demo --as-of 2026-05-31 --agent
   ```
-- **`drift`** — Scans journal entries for debit≠credit imbalances and sub-krone øreavrunding drift using exact integer-øre arithmetic.
+- **`drift`** — Scans sales and purchases for rounding/total drift and VAT-regime breaches using exact integer-øre arithmetic; journal debit/credit imbalance is not checked, because the mirrored journal lines carry no debit/credit direction.
 
-  _Run before an MVA deadline to catch the lopsided or rounding-off entries that would otherwise slip into the return._
+  _Run before an MVA deadline to catch the rounding and VAT-regime slips that would otherwise reach the return._ Kinds: `total_mismatch`, the per-`vatType` invariants (`vat_rate`, `basis_has_vat`, `direct_has_net`, `nondeductible_embedded_vat`, `zero_rated_has_vat`, `unknown_vat_type`), `settled_residual`, `currency_mismatch`. `--tolerance-ore` (default 5) is a flat øre threshold.
 
   ```bash
   fiken-cli drift --company fiken-demo --period 2026-05 --agent
   ```
-- **`vat-anomaly`** — Flags sale/purchase lines whose VAT code is implausible for the account or deviates from how that vendor is usually posted.
+- **`vat-anomaly`** — Flags sale/purchase lines whose VAT type is implausible for the side, or deviates from the modal VAT type over the trailing 12 months for that (contact, account, normalised description) group. `--min-samples` (default 3) is how many lines must back the modal.
 
   _Use during pre-MVA review to surface mis-coded VAT before it reaches the filed return._
 
@@ -208,9 +224,9 @@ These capabilities aren't available in any other tool for this API.
   ```bash
   fiken-cli duplicates --window-days 5 --company fiken-demo --agent
   ```
-- **`missing-bilag`** — Lists postings in a period that have no attached documentation (empty attachments).
+- **`missing-bilag`** — Scans purchases and journal entries in a period whose `attachments` array is missing or empty, reporting each document's amount as its impact.
 
-  _Run before closing a period to find postings that still need a receipt attached._
+  _Run before closing a period to find postings that still need a receipt attached; the biggest undocumented amounts sort first._
 
   ```bash
   fiken-cli missing-bilag --company fiken-demo --period 2026-05 --agent
@@ -261,27 +277,46 @@ These capabilities aren't available in any other tool for this API.
   ```
 
 ### BI & VAT analytics
-- **`mva-summary`** — Reconstructs a VAT-return-shaped view from local lines: net basis and output/input VAT bucketed per VAT code, for any period.
+- **`mva-summary`** — Reconstructs a VAT-return-shaped view from local lines: net basis and output/input VAT bucketed by (`vatType`, `mva_code`), for any period.
 
-  _Reach for this to preview what an MVA return will look like, or to reconcile against the official termin report._
+  _Reach for this to preview what an MVA return will look like, or to reconcile against the official termin report._ Also carries `findings[]` for reverse-charge buckets that disagree with the journal's 2702/2712 pair, and `transactions_indexed`.
 
   ```bash
   fiken-cli mva-summary --company fiken-demo --period 2026-03 --agent
   ```
-- **`rollup`** — Grouped revenue/cost/margin rollups over the local mirror by month, account, project, or contact.
+- **`rollup`** — Grouped revenue/cost/margin rollups over the local mirror by month, account, or contact. `--by` takes only those three; there is no project dimension, because the mirrored sales/purchase lines carry no project.
 
-  _Use for BI dashboards and ad-hoc 'margin by project this quarter' questions without re-deriving from raw entities._
+  _Use for BI dashboards and ad-hoc 'margin by month this quarter' questions without re-deriving from raw entities._
 
   ```bash
-  fiken-cli rollup --by month --metric margin --company fiken-demo --agent --select rows.period,rows.margin
+  fiken-cli rollup --by month --metric margin --company fiken-demo --agent --select rows.label,rows.margin
   ```
-- **`vendor-profile`** — Shows how a vendor is usually posted: the modal account and VAT code, with frequency and last-used.
+- **`vendor-profile`** — Shows how a vendor is usually posted: the modal account and VAT code, with frequency and last-used. Takes `--period`; the two modals are bounded to the last `modal_window_months` (12) of purchases inside it.
 
   _Use to decide the right account/VAT for a new bill from a known vendor, or to explain why a posting looks anomalous._
 
   ```bash
   fiken-cli vendor-profile 1234567 --company fiken-demo --agent
   ```
+
+## Report shape and periods
+
+`drift`, `duplicates`, `missing-bilag`, `vat-anomaly` and `bank-unverified` emit one envelope, inside the standard provenance wrapper:
+
+```json
+{"results": {"company": "...", "detector": "drift",
+             "window": {"from": "2026-01-01", "to": "2026-12-31", "source": "flag"},
+             "total_findings": 12, "undated_documents": 0, "params": {},
+             "summary": [{"key": {}, "count": 3, "impact_ore": -450, "severity": "error"}],
+             "findings": [{"kind": "...", "severity": "...", "doc_type": "...", "doc_id": 1, "date": "...",
+                           "contact_id": 1, "contact_name": "...", "description": "...", "account": "...",
+                           "vat_type": "...", "impact_ore": -150, "detail": {}}]},
+ "meta": {"source": "local", "reason": "user_requested"}}
+```
+
+`--min-impact-ore` drops findings below an absolute øre threshold; `--limit` (default 200) truncates `findings[]` only — `total_findings` and `summary[]` always describe the full set. Findings sort by |impact| descending, then date; text output leads with the summary block.
+
+`--period` on `drift`, `duplicates`, `missing-bilag`, `vat-anomaly`, `mva-summary`, `rollup` and `vendor-profile` accepts `YYYY`, `YYYY-MM`, `YYYY-Qn`, `from:to` (YYYY-MM-DD), or `all`. **Unset means the current calendar year, not all history** — `window.source` records which (`flag` | `default_current_year` | `all`), and `undated_documents` counts the documents skipped for having no date. `bank-unverified` is anchored to each account's own reconciled date and takes `--as-of` instead.
 
 ## Recipes
 
@@ -300,7 +335,7 @@ Shows the ledger-vs-reconciled gap per bank account and the postings dated after
 fiken-cli drift --company fiken-demo --period 2026-05 --agent
 ```
 
-Catches debit/credit imbalances and sub-krone rounding drift across the period in exact øre.
+Catches sub-krone rounding drift, header-vs-lines mismatches and VAT-regime breaches across the period in exact øre. Without `--period` it covers the current calendar year.
 
 ### BI rollup narrowed for agents
 
@@ -324,7 +359,7 @@ Builds a posting proposal from an inbox document; pipe it to validate, then comm
 fiken-cli mva-summary --company fiken-demo --period 2026-03 --agent
 ```
 
-Reconstructs the output/input VAT view per code so you can sanity-check before filing.
+Reconstructs the output/input VAT view per (`vatType`, `mva_code`) so you can sanity-check before filing.
 
 ## Usage
 
@@ -654,7 +689,7 @@ This CLI is designed for AI agent consumption:
 - **Offline-friendly** - sync/search commands can use the local SQLite store when available
 - **Agent-safe by default** - no colors or formatting unless `--human-friendly` is set
 
-Exit codes: `0` success, `2` usage error, `3` not found, `4` auth error, `5` API error, `7` rate limited, `10` config error.
+Exit codes: `0` success, `2` usage error, `3` not found, `4` auth error, `5` API error, `7` rate limited, `8` write refused by the test-company guard (nothing was sent), `10` config error.
 
 ## Health Check
 

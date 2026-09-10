@@ -105,7 +105,9 @@ func newActivitiesCreateActivityCmd(flags *rootFlags) *cobra.Command {
 				}
 			}
 			if !flags.dryRun && statusCode >= 200 && statusCode < 300 && (partialFailure == nil || flags.allowPartialFailure) {
-				writeMutationResponseToStore(cmd.Context(), "activities", data, "")
+				// PATCH(mutation-cache-parent-id): request path threaded in so the cached
+				// mutation row is stamped with parent_id and keyed per company.
+				writeMutationResponseToStore(cmd.Context(), "activities", data, "", path)
 			}
 			if wantsHumanTable(cmd.OutOrStdout(), flags) {
 				// Check if response contains an array (directly or wrapped in "data")
