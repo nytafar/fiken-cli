@@ -1,7 +1,9 @@
 version: 2
 project_name: fiken-cli
+
 changelog:
   disable: true
+
 builds:
   - id: fiken-cli
     main: ./cmd/fiken-cli
@@ -10,13 +12,8 @@ builds:
       - CGO_ENABLED=0
     ldflags:
       - -s -w -X fiken-cli/internal/cli.version={{ .Version }}
-    targets:
-      - darwin_amd64
-      - darwin_arm64
-      - linux_amd64
-      - linux_arm64
-      - windows_amd64
-      - windows_arm64
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
   - id: fiken-mcp
     main: ./cmd/fiken-mcp
     binary: fiken-mcp
@@ -24,28 +21,19 @@ builds:
       - CGO_ENABLED=0
     ldflags:
       - -s -w -X main.version={{ .Version }}
-    targets:
-      - darwin_amd64
-      - darwin_arm64
-      - linux_amd64
-      - linux_arm64
-      - windows_amd64
-      - windows_arm64
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+
 archives:
   - formats: [tar.gz]
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     format_overrides:
       - goos: windows
         formats: [zip]
+    files:
+      - README.md
+      - LICENSE
+      - SKILL.md
+
 checksum:
   name_template: checksums.txt
-brews:
-  - name: fiken-cli
-    repository:
-      owner: nytafar
-      name: homebrew-tap
-    homepage: "https://github.com/nytafar/fiken-cli"
-    description: "The agent-native Fiken CLI: full read coverage with offline search and a local SQLite mirror, plus the gated, audited"
-    install: |
-      bin.install "fiken-cli"
-      bin.install "fiken-mcp"
