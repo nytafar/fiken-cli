@@ -18,6 +18,8 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+
+	"fiken-cli/internal/fikencore"
 )
 
 type rollupRow struct {
@@ -283,14 +285,17 @@ func monthKey(date string) string {
 	return date
 }
 
-// purchaseGross sums a purchase's line gross (netPrice + vat) — purchases carry
-// no reliable header total, so this derives it from the lines.
+// purchaseGross sums a purchase's line gross — purchases carry no reliable
+// header total, so this derives it from the lines. What "gross" means depends
+// on the line's VAT regime (net+vat only for ordinary domestic VAT), so the
+// regime authority answers it; an unrecognised vatType falls back to net+vat.
 func purchaseGross(p map[string]json.RawMessage) int64 {
 	var g int64
 	for _, ln := range jsonObjects(p, "lines") {
 		net, _ := jsonInt(ln, "netPrice")
 		vat, _ := jsonInt(ln, "vat")
-		g += net + vat
+		info, _ := fikencore.Lookup(jsonStr(ln, "vatType"))
+		g += fikencore.Gross(info, net, vat)
 	}
 	return g
 }

@@ -2,9 +2,7 @@
 # `path:pattern` — a known `strings.HasPrefix` on a vatType, reported as a
 # warning instead of a failure. Each entry is debt, not a blessing.
 #
-# internal/cli/drift.go holds a private VAT rate table that prefix-matches the
-# vatType (root cause F1 in docs/PLAN.md). Phase 2 replaces it with the
-# authority in internal/fikencore; these three lines go away with it.
-internal/cli/drift.go:strings.HasPrefix(vatType, "HIGH")
-internal/cli/drift.go:strings.HasPrefix(vatType, "MEDIUM")
-internal/cli/drift.go:strings.HasPrefix(vatType, "LOW")
+# EMPTY, and it should stay that way. The private rate tables that used to be
+# listed here (internal/cli/drift.go, internal/fikencore/validate.go) are gone:
+# every rate and regime now comes from internal/fikencore/vat.go, which matches
+# a vatType exactly and never by prefix.

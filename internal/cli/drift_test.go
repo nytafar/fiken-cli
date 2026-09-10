@@ -53,13 +53,117 @@ func TestDriftScan(t *testing.T) {
 			wantKinds: []string{"vat_rate"},
 		},
 		{
-			name: "NONE vatType line is never rate-checked",
+			name: "NONE vatType line must carry no VAT",
 			docs: []driftScanDoc{{
 				DocType: "purchase", DocID: 8, Date: "2026-02-02",
 				Lines: []driftScanLine{{Account: "4000:1", VATType: "NONE", NetPrice: 10000, VAT: 999}},
 			}},
 			tolerance: 1,
+			wantKinds: []string{"zero_rated_has_vat"},
+		},
+		{
+			name: "a correct reverse-charge basis line yields nothing",
+			docs: []driftScanDoc{{
+				DocType: "purchase", DocID: 20, Date: "2026-03-01",
+				// The VAT of a code-86 line is posted by Fiken as a 2702/2712
+				// pair, never on the line: net alone, vat 0, is correct.
+				Lines: []driftScanLine{{Account: "6553:1", VATType: "HIGH_FOREIGN_SERVICE_DEDUCTIBLE", NetPrice: 200000, VAT: 0}},
+			}},
+			tolerance: 5,
 			wantKinds: nil,
+		},
+		{
+			name: "a correct import-basis line yields nothing",
+			docs: []driftScanDoc{{
+				DocType: "purchase", DocID: 21, Date: "2026-03-02",
+				Lines: []driftScanLine{{Account: "4130:1", VATType: "MEDIUM_BASIS", NetPrice: 500000, VAT: 0}},
+			}},
+			tolerance: 5,
+			wantKinds: nil,
+		},
+		{
+			name: "a basis line carrying VAT is flagged",
+			docs: []driftScanDoc{{
+				DocType: "purchase", DocID: 22, Date: "2026-03-03",
+				Lines: []driftScanLine{{Account: "4130:1", VATType: "HIGH_BASIS", NetPrice: 200000, VAT: 50000}},
+			}},
+			tolerance: 5,
+			wantKinds: []string{"basis_has_vat"},
+		},
+		{
+			name: "a correct direct line (no basis, VAT is the amount) yields nothing",
+			docs: []driftScanDoc{{
+				DocType: "purchase", DocID: 23, Date: "2026-03-04",
+				Lines: []driftScanLine{{Account: "2713:1", VATType: "MEDIUM_DIRECT", NetPrice: 0, VAT: 43210}},
+			}},
+			tolerance: 5,
+			wantKinds: nil,
+		},
+		{
+			name: "a direct line with a basis is flagged",
+			docs: []driftScanDoc{{
+				DocType: "purchase", DocID: 24, Date: "2026-03-05",
+				Lines: []driftScanLine{{Account: "2713:1", VATType: "HIGH_DIRECT", NetPrice: 20000, VAT: 5000}},
+			}},
+			tolerance: 5,
+			wantKinds: []string{"direct_has_net"},
+		},
+		{
+			name: "a correct nondeductible reverse-charge line yields nothing",
+			docs: []driftScanDoc{{
+				DocType: "purchase", DocID: 25, Date: "2026-03-06",
+				// netPrice is VAT-inclusive (125000 = 100000 * 1.25) and the
+				// line vat is the negative embedded amount.
+				Lines: []driftScanLine{{Account: "6553:1", VATType: "HIGH_FOREIGN_SERVICE_NONDEDUCTIBLE", NetPrice: 125000, VAT: -25000}},
+			}},
+			tolerance: 5,
+			wantKinds: nil,
+		},
+		{
+			name: "a nondeductible line with the sign flipped is flagged",
+			docs: []driftScanDoc{{
+				DocType: "purchase", DocID: 26, Date: "2026-03-07",
+				Lines: []driftScanLine{{Account: "6553:1", VATType: "HIGH_FOREIGN_SERVICE_NONDEDUCTIBLE", NetPrice: 125000, VAT: 25000}},
+			}},
+			tolerance: 5,
+			wantKinds: []string{"nondeductible_embedded_vat"},
+		},
+		{
+			name: "an unknown vatType is reported, never skipped",
+			docs: []driftScanDoc{{
+				DocType: "purchase", DocID: 27, Date: "2026-03-08",
+				Lines: []driftScanLine{{Account: "4000:1", VATType: "HIGH_INVENTED", NetPrice: 10000, VAT: 2500}},
+			}},
+			tolerance: 5,
+			wantKinds: []string{"unknown_vat_type"},
+		},
+		{
+			name: "an empty vatType is an unknown type too",
+			docs: []driftScanDoc{{
+				DocType: "purchase", DocID: 28, Date: "2026-03-09",
+				Lines: []driftScanLine{{Account: "4000:1", VATType: "", NetPrice: 10000, VAT: 0}},
+			}},
+			tolerance: 5,
+			wantKinds: []string{"unknown_vat_type"},
+		},
+		{
+			name: "3 øre of aggregation rounding passes at the default tolerance 5",
+			docs: []driftScanDoc{{
+				DocType: "sale", DocID: 29, Date: "2026-03-10",
+				// 3900 * 0.15 = 585; the invoice aggregates to 588.
+				Lines: []driftScanLine{{Account: "3020:1", VATType: "MEDIUM", NetPrice: 3900, VAT: 588}},
+			}},
+			tolerance: 5,
+			wantKinds: nil,
+		},
+		{
+			name: "the same 3 øre is a finding at tolerance 1",
+			docs: []driftScanDoc{{
+				DocType: "sale", DocID: 30, Date: "2026-03-11",
+				Lines: []driftScanLine{{Account: "3020:1", VATType: "MEDIUM", NetPrice: 3900, VAT: 588}},
+			}},
+			tolerance: 1,
+			wantKinds: []string{"vat_rate"},
 		},
 		{
 			name: "purchase never triggers total_mismatch (no header)",
@@ -96,37 +200,5 @@ func TestDriftScan(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-func TestVatRateForType(t *testing.T) {
-	cases := map[string]float64{
-		"HIGH":        0.25,
-		"HIGH_DIRECT": 0.25,
-		"MEDIUM":      0.15,
-		"LOW":         0.12,
-		"RAW_FISH":    0.1111,
-		"NONE":        0,
-		"EXEMPT":      0,
-		"":            0,
-	}
-	for in, want := range cases {
-		if got := vatRateForType(in); got != want {
-			t.Errorf("vatRateForType(%q) = %v, want %v", in, got, want)
-		}
-	}
-}
-
-func TestRoundOre(t *testing.T) {
-	cases := []struct {
-		in   float64
-		want int64
-	}{
-		{83.25, 83}, {83.5, 84}, {2512.5, 2513}, {-83.5, -84}, {0, 0},
-	}
-	for _, c := range cases {
-		if got := roundOre(c.in); got != c.want {
-			t.Errorf("roundOre(%v) = %d, want %d", c.in, got, c.want)
-		}
 	}
 }

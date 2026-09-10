@@ -2,9 +2,13 @@
 //
 // HAND-AUTHORED (NOVEL) — fill-in of the generator's verify-friendly stub
 // (skip-if-exists on regen). Reconstructs a VAT-return-shaped view from the
-// local mirror: output VAT (sales lines) and input VAT (purchase lines)
-// bucketed per vatType, with net basis and VAT summed per bucket, and the net
-// VAT position (output VAT − input VAT). Reads only the local mirror.
+// local mirror. Every line is mapped onto its basis, output VAT and input VAT
+// by the regime authority in internal/fikencore rather than by summing the
+// line's `vat` field — which is 0 on a basis line, the whole amount on a
+// direct line and negative on a nondeductible reverse-charge line. A purchase
+// bucket can therefore carry output VAT (reverse charge), and the reported net
+// position is total output − total input across both sides. Reads only the
+// local mirror.
 package cli
 
 // pp:data-source local
@@ -16,23 +20,33 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+
+	"fiken-cli/internal/fikencore"
 )
 
 type mvaBucket struct {
-	VATType  string `json:"vat_type"`
-	BasisOre int64  `json:"basis_ore"`
-	Basis    string `json:"basis"`
-	VATOre   int64  `json:"vat_ore"`
-	VAT      string `json:"vat"`
+	VATType      string `json:"vat_type"`
+	Regime       string `json:"regime"`
+	MVACode      int    `json:"mva_code,omitempty"`
+	BasisOre     int64  `json:"basis_ore"`
+	Basis        string `json:"basis"`
+	OutputVATOre int64  `json:"output_vat_ore"`
+	OutputVAT    string `json:"output_vat"`
+	InputVATOre  int64  `json:"input_vat_ore"`
+	InputVAT     string `json:"input_vat"`
 }
 
 type mvaSummaryReport struct {
-	Company   string      `json:"company"`
-	Period    string      `json:"period,omitempty"`
-	Output    []mvaBucket `json:"output"`
-	Input     []mvaBucket `json:"input"`
-	NetVATOre int64       `json:"net_vat_ore"`
-	NetVAT    string      `json:"net_vat"`
+	Company        string      `json:"company"`
+	Period         string      `json:"period,omitempty"`
+	Output         []mvaBucket `json:"output"`
+	Input          []mvaBucket `json:"input"`
+	TotalOutputOre int64       `json:"total_output_vat_ore"`
+	TotalOutput    string      `json:"total_output_vat"`
+	TotalInputOre  int64       `json:"total_input_vat_ore"`
+	TotalInput     string      `json:"total_input_vat"`
+	NetVATOre      int64       `json:"net_vat_ore"`
+	NetVAT         string      `json:"net_vat"`
 }
 
 // mvaLine is the minimal per-line shape the summarizer needs.
@@ -42,35 +56,63 @@ type mvaLine struct {
 	VATOre   int64 // vat
 }
 
-// summarizeMVA buckets lines by vatType into sorted buckets and returns the
-// total VAT across all buckets. Pure; no Cobra/DB.
-func summarizeMVA(lines []mvaLine) (buckets []mvaBucket, totalVATOre int64) {
+// summarizeMVA buckets one side's lines by vatType and returns the sorted
+// buckets plus the output and input VAT they total to. side is the document
+// side the lines came from ("sales" or "purchases"): the five both-sided types
+// cannot say from the taxonomy alone whether their VAT is output or input, so
+// the document answers that. A vatType the authority does not know gets its
+// own bucket with regime "unknown" and the line's raw vat on the document's
+// side — visible rather than silently dropped. Pure; no Cobra/DB.
+func summarizeMVA(lines []mvaLine, side string) (buckets []mvaBucket, outputVATOre, inputVATOre int64) {
 	type agg struct {
-		basis, vat int64
+		regime            string
+		code              int
+		basis, output, in int64
 	}
 	by := map[string]*agg{}
 	for _, ln := range lines {
+		info, known := fikencore.Lookup(ln.VATType)
+		regime := "unknown"
+		code := 0
+		if known {
+			regime = info.Regime.String()
+			if c, ok := fikencore.CodeFor(ln.VATType, side); ok {
+				code = c
+			} else {
+				code = info.Code
+			}
+		}
+		if info.Side == fikencore.SideBoth || info.Side == "" {
+			info.Side = side
+		}
+		basis, output, input := fikencore.ReturnFigures(info, ln.BasisOre, ln.VATOre)
 		a := by[ln.VATType]
 		if a == nil {
-			a = &agg{}
+			a = &agg{regime: regime, code: code}
 			by[ln.VATType] = a
 		}
-		a.basis += ln.BasisOre
-		a.vat += ln.VATOre
-		totalVATOre += ln.VATOre
+		a.basis += basis
+		a.output += output
+		a.in += input
+		outputVATOre += output
+		inputVATOre += input
 	}
 	buckets = make([]mvaBucket, 0, len(by))
 	for vt, a := range by {
 		buckets = append(buckets, mvaBucket{
-			VATType:  vt,
-			BasisOre: a.basis,
-			Basis:    kr(a.basis),
-			VATOre:   a.vat,
-			VAT:      kr(a.vat),
+			VATType:      vt,
+			Regime:       a.regime,
+			MVACode:      a.code,
+			BasisOre:     a.basis,
+			Basis:        kr(a.basis),
+			OutputVATOre: a.output,
+			OutputVAT:    kr(a.output),
+			InputVATOre:  a.in,
+			InputVAT:     kr(a.in),
 		})
 	}
 	sort.SliceStable(buckets, func(i, j int) bool { return buckets[i].VATType < buckets[j].VATType })
-	return buckets, totalVATOre
+	return buckets, outputVATOre, inputVATOre
 }
 
 func newNovelMvaSummaryCmd(flags *rootFlags) *cobra.Command {
@@ -81,8 +123,10 @@ func newNovelMvaSummaryCmd(flags *rootFlags) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "mva-summary",
 		Short: "Summarize output/input VAT per VAT type (a VAT-return-shaped view)",
-		Long: "Buckets sales lines (output VAT) and purchase lines (input VAT) by VAT type, summing the\n" +
-			"net basis and VAT in each bucket, and reports the net VAT position (output − input).\n" +
+		Long: "Buckets sales and purchase lines by VAT type, mapping each line onto the basis,\n" +
+			"output VAT and input VAT its vatType's regime implies (a reverse-charge purchase\n" +
+			"carries both sides; a basis line's VAT is computed, not read off the line), and\n" +
+			"reports the net VAT position (total output − total input).\n" +
 			"Pass --period to scope to a term; empty summarizes everything. Reads the local mirror.",
 		Example: strings.Trim(`
   fiken-cli mva-summary --company fiken-demo --period 2026-Q1
@@ -149,16 +193,24 @@ func newNovelMvaSummaryCmd(flags *rootFlags) *cobra.Command {
 				return err
 			}
 
-			outBuckets, outTotal := summarizeMVA(collect(sales))
-			inBuckets, inTotal := summarizeMVA(collect(purchases))
-			net := outTotal - inTotal
+			// A purchase can carry output VAT (reverse charge), so the totals
+			// are taken across both sides, not one per side.
+			salesBuckets, salesOut, salesIn := summarizeMVA(collect(sales), fikencore.SideSales)
+			purchBuckets, purchOut, purchIn := summarizeMVA(collect(purchases), fikencore.SidePurchases)
+			totalOut := salesOut + purchOut
+			totalIn := salesIn + purchIn
+			net := totalOut - totalIn
 			report := mvaSummaryReport{
-				Company:   slug,
-				Period:    flagPeriod,
-				Output:    outBuckets,
-				Input:     inBuckets,
-				NetVATOre: net,
-				NetVAT:    kr(net),
+				Company:        slug,
+				Period:         flagPeriod,
+				Output:         salesBuckets,
+				Input:          purchBuckets,
+				TotalOutputOre: totalOut,
+				TotalOutput:    kr(totalOut),
+				TotalInputOre:  totalIn,
+				TotalInput:     kr(totalIn),
+				NetVATOre:      net,
+				NetVAT:         kr(net),
 			}
 			return emitFiken(cmd, flags, report, func() {
 				w := cmd.OutOrStdout()
@@ -174,12 +226,18 @@ func newNovelMvaSummaryCmd(flags *rootFlags) *cobra.Command {
 						return
 					}
 					for _, b := range bs {
-						fmt.Fprintf(w, "  %-10s basis %14s kr   vat %14s kr\n", b.VATType, b.Basis, b.VAT)
+						code := ""
+						if b.MVACode != 0 {
+							code = fmt.Sprintf("kode %d", b.MVACode)
+						}
+						fmt.Fprintf(w, "  %-55s %-22s %-8s basis %14s kr   utg %12s kr   inng %12s kr\n",
+							b.VATType, b.Regime, code, b.Basis, b.OutputVAT, b.InputVAT)
 					}
 				}
-				printBuckets("Output VAT (sales)", report.Output)
-				printBuckets("Input VAT (purchases)", report.Input)
-				fmt.Fprintf(w, "\nNet VAT (output − input): %s kr\n", report.NetVAT)
+				printBuckets("Sales lines", report.Output)
+				printBuckets("Purchase lines", report.Input)
+				fmt.Fprintf(w, "\nOutput VAT %s kr, input VAT %s kr\n", report.TotalOutput, report.TotalInput)
+				fmt.Fprintf(w, "Net VAT (output − input): %s kr\n", report.NetVAT)
 			})
 		},
 	}

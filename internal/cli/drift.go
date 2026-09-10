@@ -6,7 +6,13 @@
 //   - total_mismatch: a sale's summed line netPrice/vat disagreeing with its
 //     own netAmount/vatAmount header (purchases carry no reliable header total,
 //     so they're exempt from this check).
-//   - vat_rate: a line whose recorded vat differs from netPrice*rate(vatType).
+//   - the per-regime VAT invariant of every order line, from the authority in
+//     internal/fikencore: ordinary domestic lines must carry round(net*rate)
+//     (vat_rate), basis and zero-rated lines must carry no VAT at all
+//     (basis_has_vat / zero_rated_has_vat), a direct line must carry no basis
+//     (direct_has_net), and a nondeductible reverse-charge line must carry the
+//     negative embedded VAT (nondeductible_embedded_vat). A vatType the
+//     authority does not know is reported (unknown_vat_type), never skipped.
 //
 // Note: journal-entry debit≠credit imbalance is NOT computable from the GET
 // data — the mirror's journal lines carry a signed `amount` but no
@@ -23,10 +29,12 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+
+	"fiken-cli/internal/fikencore"
 )
 
 type driftFinding struct {
-	Kind        string `json:"kind"` // total_mismatch | vat_rate
+	Kind        string `json:"kind"` // total_mismatch | one of the fikencore line-invariant kinds
 	DocType     string `json:"doc_type"`
 	DocID       int64  `json:"doc_id"`
 	Date        string `json:"date"`
@@ -47,31 +55,6 @@ type driftReport struct {
 	ToleranceOre  int64          `json:"tolerance_ore"`
 	TotalFindings int            `json:"total_findings"`
 	Findings      []driftFinding `json:"findings"`
-}
-
-// vatRateForType returns the VAT rate (as a fraction) implied by a Fiken
-// vatType string, for the subset of types whose rate is unambiguous. Types
-// that imply no output VAT (NONE/EXEMPT/OUTSIDE/…) return 0.
-func vatRateForType(vatType string) float64 {
-	switch {
-	case strings.HasPrefix(vatType, "HIGH"):
-		return 0.25
-	case strings.HasPrefix(vatType, "MEDIUM"):
-		return 0.15
-	case vatType == "RAW_FISH":
-		return 0.1111
-	case strings.HasPrefix(vatType, "LOW"):
-		return 0.12
-	default:
-		return 0
-	}
-}
-
-func roundOre(x float64) int64 {
-	if x < 0 {
-		return int64(x - 0.5)
-	}
-	return int64(x + 0.5)
 }
 
 func absInt64(x int64) int64 {
@@ -99,6 +82,22 @@ type driftScanLine struct {
 	VATType  string
 	NetPrice int64
 	VAT      int64
+}
+
+// driftNote explains a line-invariant violation in the terms of its regime.
+func driftNote(kind, vatType string, expected, actual int64) string {
+	switch kind {
+	case fikencore.KindBasisHasVAT:
+		return fmt.Sprintf("%s is a basis (grunnlag) type — the VAT belongs in the MVA return, not on the line, but the line carries %s", vatType, kr(actual))
+	case fikencore.KindZeroRatedHasVAT:
+		return fmt.Sprintf("%s carries no VAT, but the line carries %s", vatType, kr(actual))
+	case fikencore.KindDirectHasNet:
+		return fmt.Sprintf("%s posts VAT with no basis — netPrice should be 0, but the line carries %s", vatType, kr(actual))
+	case fikencore.KindNondeductibleEmbeddedVAT:
+		return fmt.Sprintf("%s has a VAT-inclusive netPrice, so the line vat should be the negative embedded %s, not %s", vatType, kr(expected), kr(actual))
+	default:
+		return fmt.Sprintf("vat %s differs from %s expected at rate for %s", kr(actual), kr(expected), vatType)
+	}
 }
 
 // driftScan is the pure detector: given the scanned docs and a tolerance in
@@ -144,30 +143,51 @@ func driftScan(docs []driftScanDoc, toleranceOre int64) []driftFinding {
 				})
 			}
 		}
-		// vat_rate: each line's vat vs expected from its rate.
+		// Per-line VAT: the invariant that the line's regime carries.
 		for _, ln := range d.Lines {
-			rate := vatRateForType(ln.VATType)
-			if rate == 0 {
-				continue // no determinable expected VAT (NONE/EXEMPT/unknown)
-			}
-			expected := roundOre(float64(ln.NetPrice) * rate)
-			if diff := ln.VAT - expected; absInt64(diff) > toleranceOre {
+			info, known := fikencore.Lookup(ln.VATType)
+			if !known {
 				findings = append(findings, driftFinding{
-					Kind:        "vat_rate",
-					DocType:     d.DocType,
-					DocID:       d.DocID,
-					Date:        d.Date,
-					Account:     ln.Account,
-					VATType:     ln.VATType,
-					ExpectedOre: expected,
-					Expected:    kr(expected),
-					ActualOre:   ln.VAT,
-					Actual:      kr(ln.VAT),
-					DiffOre:     diff,
-					Diff:        kr(diff),
-					Note:        fmt.Sprintf("vat %s differs from %s expected at rate for %s", kr(ln.VAT), kr(expected), ln.VATType),
+					Kind:      fikencore.KindUnknownVATType,
+					DocType:   d.DocType,
+					DocID:     d.DocID,
+					Date:      d.Date,
+					Account:   ln.Account,
+					VATType:   ln.VATType,
+					Expected:  kr(0),
+					ActualOre: ln.VAT,
+					Actual:    kr(ln.VAT),
+					Diff:      kr(0),
+					Note:      fmt.Sprintf("vatType %s is not a recognized Fiken type — its VAT cannot be checked", orNone(ln.VATType)),
 				})
+				continue
 			}
+			ok, kind, diff := fikencore.LineInvariant(info, ln.NetPrice, ln.VAT, toleranceOre)
+			if ok {
+				continue
+			}
+			// For every kind but direct_has_net the quantity under test is the
+			// line's vat; for that one it is the net, which must be zero.
+			actual := ln.VAT
+			if kind == fikencore.KindDirectHasNet {
+				actual = ln.NetPrice
+			}
+			expected := actual - diff
+			findings = append(findings, driftFinding{
+				Kind:        kind,
+				DocType:     d.DocType,
+				DocID:       d.DocID,
+				Date:        d.Date,
+				Account:     ln.Account,
+				VATType:     ln.VATType,
+				ExpectedOre: expected,
+				Expected:    kr(expected),
+				ActualOre:   actual,
+				Actual:      kr(actual),
+				DiffOre:     diff,
+				Diff:        kr(diff),
+				Note:        driftNote(kind, ln.VATType, expected, actual),
+			})
 		}
 	}
 	sort.SliceStable(findings, func(i, j int) bool {
@@ -189,9 +209,12 @@ func newNovelDriftCmd(flags *rootFlags) *cobra.Command {
 		Use:   "drift",
 		Short: "Find rounding/total drift and VAT-rate mismatches",
 		Long: "Scans sales and purchases in a period for two problems: a sale whose summed line\n" +
-			"net/vat disagrees with its own header totals, and any line whose recorded VAT\n" +
-			"differs from netPrice*rate(vatType). Journal debit/credit imbalance is NOT checked —\n" +
-			"the mirror's journal lines lack a debit/credit direction. Reads the local mirror.",
+			"net/vat disagrees with its own header totals, and any line that breaks the VAT\n" +
+			"invariant of its vatType's regime — ordinary domestic lines must carry the rate,\n" +
+			"basis and zero-rated lines no VAT, direct lines no basis, and nondeductible\n" +
+			"reverse-charge lines the negative embedded VAT. Journal debit/credit imbalance is\n" +
+			"NOT checked — the mirror's journal lines lack a debit/credit direction. Reads the\n" +
+			"local mirror.",
 		Example: strings.Trim(`
   fiken-cli drift --company fiken-demo
   fiken-cli drift --company fiken-demo --period 2026-Q1 --tolerance-ore 2 --agent`, "\n"),
@@ -318,6 +341,6 @@ func newNovelDriftCmd(flags *rootFlags) *cobra.Command {
 	cmd.Flags().StringVar(&flagCompany, "company", "", "Company slug (default: the single synced company)")
 	cmd.Flags().StringVar(&flagPeriod, "period", "", "Period to scan: YYYY, YYYY-MM, YYYY-Qn, or from:to (default: all)")
 	cmd.Flags().StringVar(&dbPath, "db", "", "Mirror database path (default: ~/.local/share/fiken-cli/data.db)")
-	cmd.Flags().Int64Var(&toleranceOre, "tolerance-ore", 1, "Ignore differences at or below this many øre")
+	cmd.Flags().Int64Var(&toleranceOre, "tolerance-ore", 5, "Ignore differences at or below this many øre (flat, not a percentage)")
 	return cmd
 }

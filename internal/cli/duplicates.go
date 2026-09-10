@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"fiken-cli/internal/fikencore"
 )
 
 type duplicateDoc struct {
@@ -186,12 +188,18 @@ func newNovelDuplicatesCmd(flags *rootFlags) *cobra.Command {
 				}
 				return true
 			}
+			// The gross a line contributes depends on its VAT regime (net+vat
+			// only for ordinary domestic VAT), so the regime authority answers
+			// it — otherwise a reverse-charge purchase and an ordinary one of a
+			// different size collide into one duplicate bucket. An
+			// unrecognised vatType falls back to net+vat.
 			lineGross := func(m map[string]json.RawMessage) int64 {
 				var g int64
 				for _, ln := range jsonObjects(m, "lines") {
 					net, _ := jsonInt(ln, "netPrice")
 					vat, _ := jsonInt(ln, "vat")
-					g += net + vat
+					info, _ := fikencore.Lookup(jsonStr(ln, "vatType"))
+					g += fikencore.Gross(info, net, vat)
 				}
 				return g
 			}

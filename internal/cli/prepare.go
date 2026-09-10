@@ -17,6 +17,8 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+
+	"fiken-cli/internal/fikencore"
 )
 
 type prepareSupplier struct {
@@ -71,7 +73,7 @@ func newNovelPrepareCmd(flags *rootFlags) *cobra.Command {
 				return err
 			}
 
-			rep := prepareReport{Company: slug, PurchaseVatTypes: purchaseVatTypeList()}
+			rep := prepareReport{Company: slug, PurchaseVatTypes: fikencore.TypesFor(fikencore.SidePurchases)}
 
 			var inboxID string
 			if len(args) > 0 {
@@ -147,11 +149,6 @@ func newNovelPrepareCmd(flags *rootFlags) *cobra.Command {
 	cmd.Flags().StringVar(&flagCompany, "company", "", "Company slug (default: the single synced company)")
 	cmd.Flags().StringVar(&dbPath, "db", "", "Mirror database path (default: ~/.local/share/fiken-cli/data.db)")
 	return cmd
-}
-
-func purchaseVatTypeList() []string {
-	return []string{"NONE", "HIGH", "MEDIUM", "LOW", "RAW_FISH", "HIGH_DIRECT", "HIGH_BASIS",
-		"MEDIUM_DIRECT", "MEDIUM_BASIS", "NONE_IMPORT_BASIS"}
 }
 
 func isCostAccount(code string) bool {
