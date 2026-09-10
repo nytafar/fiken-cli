@@ -1,0 +1,20 @@
+{
+  "schema_version": 2,
+  "id": "mcp-novel-feature-claims",
+  "applied_at": "2026-09-10",
+  "base_run_id": "20260609-145046",
+  "base_printing_press_version": "4.24.0",
+  "summary": "docs(mcp): correct the drift and rollup capability claims in the novel-feature index",
+  "reason": "The generated novel-feature index in internal/mcp/tools.go (command_mirror_capabilities and playbook, both seeded from .printing-press.json) advertised two capabilities the hand-authored detector layer does not have, and an agent reading the index would call them and misread the result. (1) drift was described as scanning journal entries for debit≠credit imbalances: it does not, and cannot — the mirror's journal lines carry a signed `amount` with no debit/credit direction, so the imbalance is not computable from the GET data (see the header of internal/cli/drift.go). drift actually scans sales and purchases for total_mismatch, the per-vatType regime invariants, settled_residual and currency_mismatch, in exact øre. (2) rollup was described as grouping by month, account, project, or contact, and its rationale claimed a join to project: --by accepts only month|account|contact and rejects `project` with an explicit error, because the mirrored sales/purchase lines carry no project. Three literal string edits, each marked with a // PATCH(mcp-novel-feature-claims) comment: the drift description, the rollup description plus its rationale, and the rollup playbook insight. The same claims were corrected in the hand-authored .printing-press.json, SKILL.md and README.md, and scripts/check-boundaries.sh check (e) now greps all four files for the two claim shapes so a reprint or a copied blurb fails closed.",
+  "files": [
+    "internal/mcp/tools.go"
+  ],
+  "call_sites": [
+    "// PATCH(mcp-novel-feature-claims)",
+    "journal debit/credit imbalance is not checked",
+    "rollups over the local mirror by month, account, or contact.",
+    "(joined to contact) with margin computed in exact øre"
+  ],
+  "validated_outcome": "make check passes: go vet ./..., go test ./..., and scripts/check-boundaries.sh (marker consistency, vatType prefix lint, patch-record ledger, and the new doc-claims grep). Claims re-derived by reading internal/cli/drift.go and internal/cli/rollup.go. No API call was made.",
+  "patch_count": 3
+}

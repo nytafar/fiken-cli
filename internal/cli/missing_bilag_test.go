@@ -20,20 +20,33 @@ func mustObj(t *testing.T, s string) map[string]json.RawMessage {
 
 func TestHasAttachments(t *testing.T) {
 	tests := []struct {
-		name string
-		doc  string
-		want bool
+		name         string
+		resourceType string
+		doc          string
+		want         bool
 	}{
-		{"absent attachments field", `{"purchaseId":1,"date":"2026-01-01"}`, false},
-		{"empty attachments array", `{"purchaseId":1,"attachments":[]}`, false},
-		{"null attachments", `{"purchaseId":1,"attachments":null}`, false},
-		{"one attachment present", `{"purchaseId":1,"attachments":[{"identifier":"a"}]}`, true},
-		{"several attachments", `{"attachments":[{"identifier":"a"},{"identifier":"b"}]}`, true},
+		{"purchase without attachment field", "purchases", `{"purchaseId":1,"date":"2026-01-01"}`, false},
+		{"purchase empty array", "purchases", `{"purchaseId":1,"purchaseAttachments":[]}`, false},
+		{"purchase null array", "purchases", `{"purchaseId":1,"purchaseAttachments":null}`, false},
+		{"purchase with one attachment", "purchases", `{"purchaseId":1,"purchaseAttachments":[{"identifier":"a"}]}`, true},
+		{"purchase with several attachments", "purchases", `{"purchaseAttachments":[{"identifier":"a"},{"identifier":"b"}]}`, true},
+		// The bug this table guards: purchases carry purchaseAttachments, so a
+		// bare "attachments" key on a purchase must not count as a bilag, and a
+		// documented purchase must not be reported as missing one.
+		{"purchase bare attachments key does not count", "purchases", `{"purchaseId":1,"attachments":[{"identifier":"a"}]}`, false},
+		{"sale with saleAttachments", "sales", `{"saleId":1,"saleAttachments":[{"uuid":"u"}]}`, true},
+		{"sale empty saleAttachments", "sales", `{"saleId":1,"saleAttachments":[]}`, false},
+		{"sale bare attachments key does not count", "sales", `{"saleId":1,"attachments":[{"uuid":"u"}]}`, false},
+		{"journal entry with attachments", "journal_entries", `{"journalEntryId":1,"attachments":[{"uuid":"u"}]}`, true},
+		{"journal entry empty attachments", "journal_entries", `{"journalEntryId":1,"attachments":[]}`, false},
+		{"journal entry absent attachments", "journal_entries", `{"journalEntryId":1}`, false},
+		{"unknown type falls back to attachments", "invoices", `{"attachments":[{"uuid":"u"}]}`, true},
+		{"unknown type without attachments", "invoices", `{"saleAttachments":[{"uuid":"u"}]}`, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := hasAttachments(mustObj(t, tt.doc)); got != tt.want {
-				t.Errorf("hasAttachments(%s) = %v, want %v", tt.doc, got, tt.want)
+			if got := hasAttachments(tt.resourceType, mustObj(t, tt.doc)); got != tt.want {
+				t.Errorf("hasAttachments(%q, %s) = %v, want %v", tt.resourceType, tt.doc, got, tt.want)
 			}
 		})
 	}

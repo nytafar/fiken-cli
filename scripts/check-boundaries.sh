@@ -144,6 +144,32 @@ else
 	echo "ok: no .md-only patch records"
 fi
 
+# ---------------------------------------------------------------------------
+# (e) Doc claims. The docs and the MCP feature index advertised two
+#     capabilities the code does not have: a drift debit≠credit imbalance
+#     check (the mirror's journal lines carry a signed amount but no
+#     debit/credit direction, so it is not computable) and a
+#     `rollup --by project` dimension (the mirrored lines carry no project).
+#     Both are one copy-paste of an old blurb away from coming back.
+#     Negated mentions ("... is not checked") and `validate`'s legitimate
+#     "balanced debit/credit" wording are excluded on purpose.
+# ---------------------------------------------------------------------------
+DOC_FILES=(.printing-press.json SKILL.md README.md internal/mcp/tools.go)
+doc_bad=()
+while IFS= read -r hit; do
+	[ -n "$hit" ] && doc_bad+=("$hit")
+done < <(grep -nE 'debit≠credit|debit/credit imbalance|by project|project, or contact' "${DOC_FILES[@]}" |
+	grep -vE 'is not checked|not computable|balanced debit/credit' |
+	cut -c1-140 || true)
+
+if [ ${#doc_bad[@]} -gt 0 ]; then
+	echo "FAIL: doc claims — drift does not check debit≠credit imbalance, and rollup has no project dimension:"
+	printf '  %s\n' "${doc_bad[@]}"
+	fail=1
+else
+	echo "ok: doc claims"
+fi
+
 if [ "$fail" -ne 0 ]; then
 	echo "check-boundaries: FAILED"
 	exit 1

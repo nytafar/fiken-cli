@@ -2,7 +2,7 @@
 //
 // HAND-AUTHORED (NOVEL) — fill-in of the generator's verify-friendly stub
 // (skip-if-exists on regen). Lists purchases and journal entries in a period
-// whose `attachments` array is absent or empty — the documents missing a
+// whose attachment array is absent or empty — the documents missing a
 // bilag. Reads only the local mirror.
 package cli
 
@@ -15,10 +15,27 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// hasAttachments reports whether a decoded document carries a non-empty
-// attachments array.
-func hasAttachments(m map[string]json.RawMessage) bool {
-	return len(jsonObjects(m, "attachments")) > 0
+// attachmentsField maps a mirror resource type to the field name the Fiken API
+// actually uses for its attachment array. The field is NOT called "attachments"
+// everywhere: spec.yaml names it purchaseAttachments on purchaseResult (~6647)
+// and saleAttachments on saleResult (~6852); only journalEntry (~5941) uses the
+// bare "attachments". Reading the wrong key made every purchase look
+// undocumented, so keep this table aligned with the spec.
+var attachmentsField = map[string]string{
+	"purchases":       "purchaseAttachments",
+	"sales":           "saleAttachments",
+	"journal_entries": "attachments",
+}
+
+// hasAttachments reports whether a decoded document of the given mirror
+// resource type carries a non-empty attachment array. An unknown resource type
+// falls back to the bare "attachments" spelling.
+func hasAttachments(resourceType string, m map[string]json.RawMessage) bool {
+	field, ok := attachmentsField[resourceType]
+	if !ok {
+		field = "attachments"
+	}
+	return len(jsonObjects(m, field)) > 0
 }
 
 // journalEntryImpact approximates the size of a journal entry: the sum of its
@@ -81,7 +98,7 @@ func newNovelMissingBilagCmd(flags *rootFlags) *cobra.Command {
 					undated++
 					continue
 				}
-				if !win.Contains(date) || hasAttachments(p) {
+				if !win.Contains(date) || hasAttachments("purchases", p) {
 					continue
 				}
 				id, _ := jsonInt(p, "purchaseId")
@@ -117,7 +134,7 @@ func newNovelMissingBilagCmd(flags *rootFlags) *cobra.Command {
 					undated++
 					continue
 				}
-				if !win.Contains(date) || hasAttachments(e) {
+				if !win.Contains(date) || hasAttachments("journal_entries", e) {
 					continue
 				}
 				id, _ := jsonInt(e, "journalEntryId")
