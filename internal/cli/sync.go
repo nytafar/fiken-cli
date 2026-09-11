@@ -505,7 +505,11 @@ func syncResource(ctx context.Context, c interface {
 		effectiveSince = ""
 	}
 	if effectiveSince != "" {
-		effectiveSince = formatSyncSinceValue(effectiveSince, syncResourceSinceParamFormat(resource))
+		// PATCH(sync-since-last-modified): floored to the day and stepped back
+		// one, because lastModifiedGe is inclusive and lastModifiedDate is
+		// day-granular with no zone (issue #13). This is the one formatting
+		// site for both the --since flag and the watermark above.
+		effectiveSince = syncSinceWindowValue(effectiveSince, syncSinceParamFormatFor(resource))
 	}
 
 	cursor := existingCursor
@@ -519,7 +523,10 @@ func syncResource(ctx context.Context, c interface {
 	// full-collection number recorded beside sync_state.total_count (issue #15).
 	// Computed from the same inputs userParams.applyTo injects below, so a
 	// --param / --resource-param filter counts as a window too.
-	windowedPull := syncPullIsWindowed(effectiveSince, userParams, resource, false)
+	// PATCH(sync-since-last-modified): kept as one value for the whole walk,
+	// not a bare flag, because issue #17's deletion pass must read the same
+	// decision (syncPullWindow.AllowsDeletion).
+	windowedPull := newSyncPullWindow(sinceParam, effectiveSince, userParams, resource, false)
 	// PATCH(pagination-headers): distinct storage keys landed, which is what
 	// "rows" has to mean when it is compared with Result-Count.
 	landed := newLandedIDs()
@@ -552,8 +559,11 @@ func syncResource(ctx context.Context, c interface {
 		}
 
 		// Set since filter
-		if effectiveSince != "" {
-			params[sinceParam] = effectiveSince
+		// PATCH(sync-since-last-modified): from the walk's window value, so the
+		// parameter that goes on the wire and the windowedness the completeness
+		// check and issue #17 read are the same fact.
+		if windowedPull.Value != "" {
+			params[windowedPull.Param] = windowedPull.Value
 		}
 		// Apply user-supplied --param / --resource-param overrides last so they
 		// win over spec-derived defaults (e.g. forcing mine=true on a list
@@ -818,7 +828,7 @@ func syncResource(ctx context.Context, c interface {
 	if firstPageInfo.HasResultCount && !walkTruncated && landedRows != firstPageInfo.ResultCount {
 		emitResultCountMismatch(syncEvents, resource, "", firstPageInfo.ResultCount, landedRows)
 	}
-	recordSyncResultCount(db, resource, firstPageInfo.ResultCount, shouldRecordResultCount(firstPageInfo.HasResultCount, walkTruncated, windowedPull))
+	recordSyncResultCount(db, resource, firstPageInfo.ResultCount, shouldRecordResultCount(firstPageInfo.HasResultCount, walkTruncated, windowedPull.Windowed))
 
 	// F4b symptom probe: if items were consumed and successfully
 	// extracted (extractFailures < consumed) but nothing landed in
@@ -902,12 +912,28 @@ func resourceSupportsPagination(resource string) bool {
 // validation-error 400s on APIs that reject unknown query keys.
 func syncResourceSinceParam(resource string) string {
 	switch resource {
+	// PATCH(sync-since-last-modified): the printed switch was empty, so every
+	// --since and every stored watermark was discarded and every sync was a
+	// full re-pull of every page of every resource (issue #13). spec.yaml
+	// declares the lastModifiedGe parameter on exactly these five synced list
+	// operations: getContacts (:718), getJournalEntries (:1131),
+	// getTransactions (:1274), getProducts (:2770) and getSales (:2914).
+	// purchases declares no filter and carries no lastModifiedDate; accounts,
+	// bank_accounts, companies, inbox and projects declare no date filter at
+	// all, so they keep the resource_not_incremental warning and a full pull.
+	case "contacts", "journal_entries", "transactions", "products", "sales":
+		return "lastModifiedGe"
 	}
 	return ""
 }
 
 func syncResourceSinceParamFormat(resource string) string {
 	switch resource {
+	// PATCH(sync-since-last-modified): components.parameters.lastModifiedGe is
+	// `type: string, format: date` — YYYY-MM-DD — which is the spelling
+	// formatSyncSinceValue's day arm matches on.
+	case "contacts", "journal_entries", "transactions", "products", "sales":
+		return "date"
 	}
 	return ""
 }
@@ -1777,7 +1803,9 @@ func syncDependentResource(ctx context.Context, c interface {
 		depSinceTS = ""
 	}
 	if depSinceTS != "" {
-		depSinceTS = formatSyncSinceValue(depSinceTS, syncResourceSinceParamFormat(dep.Name))
+		// PATCH(sync-since-last-modified): same day-floor-minus-one window as
+		// the flat walker (issue #13).
+		depSinceTS = syncSinceWindowValue(depSinceTS, syncSinceParamFormatFor(dep.Name))
 	}
 	// Per-resource extract-failure tracking for the F4b symptom probe and
 	// per-item primary_key_unresolved warning. See syncResource for the
@@ -1794,7 +1822,9 @@ func syncDependentResource(ctx context.Context, c interface {
 	// PATCH(pagination-headers): distinct storage keys landed for the parent
 	// being walked, and whether this pull carried an incremental window.
 	depLanded := newLandedIDs()
-	depWindowedPull := syncPullIsWindowed(depSinceTS, userParams, dep.Name, true)
+	// PATCH(sync-since-last-modified): see the flat walker; one value, read by
+	// the result-count recording today and by issue #17's deletion pass next.
+	depWindowedPull := newSyncPullWindow(depSinceParam, depSinceTS, userParams, dep.Name, true)
 	parentFKKey := dep.ParentTable + "_id"
 
 	for idx, parentRow := range parentRows {
@@ -1829,8 +1859,9 @@ func syncDependentResource(ctx context.Context, c interface {
 					params[pageSize.cursorParam] = cursor
 				}
 			}
-			if depSinceTS != "" {
-				params[depSinceParam] = depSinceTS
+			// PATCH(sync-since-last-modified): from the walk's window value.
+			if depWindowedPull.Value != "" {
+				params[depWindowedPull.Param] = depWindowedPull.Value
 			}
 			// Apply user flags last so they win over spec-derived cursor/since/limit.
 			// Dependent path: --param is skipped (already scoped by the parent path
@@ -2058,7 +2089,7 @@ func syncDependentResource(ctx context.Context, c interface {
 	// with each one either carrying the header or denying access before serving
 	// a page while holding no rows in the mirror, produces a number on the same
 	// scale as total_count, which is mirror-wide (issue #15).
-	recordSyncResultCount(db, dep.Name, depResultCountTotal, shouldRecordResultCount(everyParentAccountedFor(depParentsWithResultCount, depParentsDeniedAndEmpty, len(parentRows)), depWalkTruncated, depWindowedPull))
+	recordSyncResultCount(db, dep.Name, depResultCountTotal, shouldRecordResultCount(everyParentAccountedFor(depParentsWithResultCount, depParentsDeniedAndEmpty, len(parentRows)), depWalkTruncated, depWindowedPull.Windowed))
 
 	// F4b symptom probe: items consumed and extracted but nothing landed.
 	// See syncResource for rationale.
