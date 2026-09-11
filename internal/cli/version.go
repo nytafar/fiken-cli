@@ -15,7 +15,7 @@ import (
 // PATCH(release-2-0-0): 2.0.0 — the report envelope, period defaults and the
 // guarded-write exit code are breaking changes; see CHANGELOG.md. A reprint
 // resets this literal to the generator default.
-var version = "2.0.0"
+var version = "2.1.0"
 
 // newVersionCmd prints the CLI name and version. Shared by the HTTP and device
 // generators so both printed-CLI shapes carry an identical version command.

@@ -2,6 +2,17 @@
 
 This file is maintained by printing-press-library release automation. Do not hand-edit release sections in normal PRs.
 
+## 2.1.0 - 2026-09-11
+
+### Fixed
+
+- `sync` walks paginated resources from page 0, the spec default, instead of skipping page 1; the generated `--all` reads follow every page of a bare-array list (#12). Every mirror needs one `sync --full` after upgrading; a plain `sync` resumes from the old cursor.
+- Naming a dependent resource in `sync --resources` no longer produces a phantom unnamed failure; an unknown name emits a named `sync_error`, an empty or unmatched parent table a named `sync_warning` (#14).
+
+### Added
+
+- The client captures Fiken's `Fiken-Api-Page`, `-Page-Size`, `-Page-Count` and `-Result-Count` headers. Paginated reads publish `result_count` and `page_count` in the provenance `meta`; `sync` compares the distinct rows landed per company and resource against the header and emits `{"event":"sync_anomaly","reason":"result_count_mismatch"}` on a short pull; an unscoped, unwindowed full sync records the count in `sync_state.result_count`, shown by `doctor` next to the row count (#15).
+
 ## 2.0.0 - 2026-09-10
 
 ### Breaking
