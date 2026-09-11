@@ -21,11 +21,14 @@
 //
 // A cached response never reaches the wire, so it yields no headers: PageInfo
 // is then the zero value with Present false and consumers omit the fields.
+// There is deliberately no Get-plus-headers convenience method: the sink IS
+// the read path (resolvePaginatedReadWithStrategy and both sync walkers install
+// one), and a second entry point that bypassed the cache would be a parallel
+// read path nothing in the CLI asks for.
 package client
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"strconv"
 	"sync"
@@ -56,6 +59,10 @@ type PageInfo struct {
 	// Fiken-Api-Page but no result count must not be read as "the API says
 	// this collection holds 0 rows".
 	HasResultCount bool
+	// HasPageCount is the same distinction for Fiken-Api-Page-Count: an
+	// empty collection legitimately reports Page-Count: 0, so presence has
+	// to be tracked separately from the value or that zero is unpublishable.
+	HasPageCount bool
 }
 
 // ParsePageInfo reads the four Fiken-Api-* headers off a response header block.
@@ -82,6 +89,7 @@ func ParsePageInfo(h http.Header) PageInfo {
 	}
 	if read(HeaderPageCount, &info.PageCount) {
 		info.Present = true
+		info.HasPageCount = true
 	}
 	if read(HeaderResultCount, &info.ResultCount) {
 		info.Present = true
@@ -156,17 +164,4 @@ func capturePageInfo(ctx context.Context, h http.Header) {
 	}
 	sink, _ := ctx.Value(pageInfoSinkKey{}).(*PageInfoSink)
 	sink.capture(h)
-}
-
-// GetPage is Get plus the pagination headers of the response. It deliberately
-// uses the cache-bypassing read path: a cache hit has no headers, and a caller
-// asking for the page counts is asking about the collection as the API sees it
-// right now.
-func (c *Client) GetPage(ctx context.Context, path string, params map[string]string) (json.RawMessage, PageInfo, error) {
-	ctx, sink := NewPageInfoContext(ctx)
-	data, err := c.GetNoCache(ctx, path, params)
-	if err != nil {
-		return nil, PageInfo{}, err
-	}
-	return data, sink.PageInfo(), nil
 }

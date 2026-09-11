@@ -427,7 +427,11 @@ func collectCacheReport(ctx context.Context, staleAfterSpec string) map[string]a
 		}
 	}
 
-	rows, qerr := s.DB().Query(`SELECT resource_type, COALESCE(total_count, 0), last_synced_at FROM sync_state ORDER BY resource_type`)
+	// PATCH(pagination-headers): result_count is selected here, in the one
+	// query, not fetched per row inside the loop below: the pool is capped at
+	// two connections, so a second query issued while this one's rows are open
+	// deadlocks a Store shared with a running sync (issue #15).
+	rows, qerr := s.DB().Query(`SELECT resource_type, COALESCE(total_count, 0), last_synced_at, result_count FROM sync_state ORDER BY resource_type`)
 	if qerr != nil {
 		// sync_state may not exist on a fresh DB that has migrated but not
 		// yet had any sync runs — treat as unknown rather than error.
@@ -445,16 +449,19 @@ func collectCacheReport(ctx context.Context, staleAfterSpec string) map[string]a
 		var rtype string
 		var count int64
 		var lastSynced sql.NullTime
-		if err := rows.Scan(&rtype, &count, &lastSynced); err != nil {
+		// PATCH(pagination-headers): the API's own row count, scanned from the
+		// same row.
+		var resultCount sql.NullInt64
+		if err := rows.Scan(&rtype, &count, &lastSynced, &resultCount); err != nil {
 			continue
 		}
 		r := map[string]any{"type": rtype, "rows": count}
 		// PATCH(pagination-headers): show the API's own row count next to the
 		// one the mirror holds, so a short resource is visible in doctor
 		// instead of only in the sync stream (issue #15). Absent until a
-		// complete, unscoped sync recorded one.
-		if resultCount, ok := s.SyncResultCount(rtype); ok {
-			r["result_count"] = resultCount
+		// complete, unscoped, unwindowed sync recorded one.
+		if resultCount.Valid {
+			r["result_count"] = resultCount.Int64
 		}
 		if lastSynced.Valid {
 			haveAny = true

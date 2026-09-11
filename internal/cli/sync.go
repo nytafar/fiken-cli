@@ -474,7 +474,9 @@ func syncResource(ctx context.Context, c interface {
 	// Determine the since param value:
 	// 1. Explicit --since flag takes priority
 	// 2. Otherwise use last_synced_at from sync_state for incremental sync
-	sinceParam := syncResourceSinceParam(resource)
+	// PATCH(pagination-headers): the seam issue #13 fills; today it delegates
+	// to the generated (empty) mapping.
+	sinceParam := syncSinceParamFor(resource)
 	effectiveSince := sinceTS
 	if effectiveSince == "" && !lastSynced.IsZero() && !full {
 		effectiveSince = lastSynced.Format(time.RFC3339)
@@ -502,6 +504,13 @@ func syncResource(ctx context.Context, c interface {
 	// Fiken-Api-Result-Count; the same applies to every early exit below
 	// (issue #15). Only an uncapped walk over a whole collection is compared.
 	walkTruncated := cursor != ""
+	// PATCH(pagination-headers): an incremental pull asks the API for a window
+	// and gets that window's Result-Count back, which must not overwrite the
+	// full-collection number recorded beside sync_state.total_count (issue #15).
+	windowedPull := effectiveSince != ""
+	// PATCH(pagination-headers): distinct storage keys landed, which is what
+	// "rows" has to mean when it is compared with Result-Count.
+	landed := newLandedIDs()
 	pageSize := determinePaginationDefaults()
 	var progressCount int64
 	pagesFetched := 0
@@ -616,6 +625,7 @@ func syncResource(ctx context.Context, c interface {
 				}
 				return syncResult{Resource: resource, Err: err, Duration: time.Since(started)}
 			}
+			landed.add(resource, data) // PATCH(pagination-headers)
 			totalCount++
 			break
 		}
@@ -639,6 +649,7 @@ func syncResource(ctx context.Context, c interface {
 			return syncResult{Resource: resource, Count: totalCount, Err: fmt.Errorf("upserting batch for %s: %w", resource, err), Duration: time.Since(started)}
 		}
 
+		landed.addBatch(resource, items) // PATCH(pagination-headers)
 		consumedTotal += len(items)
 		extractFailureTotal += extractFailures
 
@@ -786,10 +797,11 @@ func syncResource(ctx context.Context, c interface {
 	// short (issue #12 was exactly this, unseen). Recorded beside total_count so
 	// doctor can show both.
 	firstPageInfo := pageSink.PageInfo()
-	if firstPageInfo.HasResultCount && !walkTruncated && totalCount != firstPageInfo.ResultCount {
-		emitResultCountMismatch(syncEvents, resource, "", firstPageInfo.ResultCount, totalCount)
+	landedRows := landed.Len()
+	if firstPageInfo.HasResultCount && !walkTruncated && landedRows != firstPageInfo.ResultCount {
+		emitResultCountMismatch(syncEvents, resource, "", firstPageInfo.ResultCount, landedRows)
 	}
-	recordSyncResultCount(db, resource, firstPageInfo.ResultCount, syncResultCountComparable(firstPageInfo.HasResultCount, walkTruncated))
+	recordSyncResultCount(db, resource, firstPageInfo.ResultCount, shouldRecordResultCount(firstPageInfo.HasResultCount, walkTruncated, windowedPull))
 
 	// F4b symptom probe: if items were consumed and successfully
 	// extracted (extractFailures < consumed) but nothing landed in
@@ -1711,10 +1723,9 @@ func syncDependentResource(ctx context.Context, c interface {
 	parentRows = scopeParentRowsToCompany(dep.ParentTable, parentRows)
 	if err != nil || len(parentRows) == 0 {
 		if len(parentRows) == 0 {
-			if humanFriendly {
-				fmt.Fprintf(os.Stderr, "  %s: skipping (parent table %s is empty, sync it first)\n", dep.Name, dep.ParentTable)
-			}
-			return syncResult{Resource: dep.Name, Duration: time.Since(started)}
+			// PATCH(sync-named-dependents): a machine-mode run used to read this
+			// as a plain success (issue #14 follow-up).
+			return dependentParentEmptyResult(syncEvents, dep.Name, dep.ParentTable, started)
 		}
 		return syncResult{Resource: dep.Name, Err: fmt.Errorf("querying parent table %s: %w", dep.ParentTable, err), Duration: time.Since(started)}
 	}
@@ -1727,7 +1738,7 @@ func syncDependentResource(ctx context.Context, c interface {
 	var deniedParents int
 	var firstDenial *accessWarning
 	pageSize := determinePaginationDefaults()
-	depSinceParam := syncResourceSinceParam(dep.Name)
+	depSinceParam := syncSinceParamFor(dep.Name) // PATCH(pagination-headers)
 	depSinceTS := sinceTS
 	if depSinceTS != "" && depSinceParam == "" {
 		if humanFriendly {
@@ -1751,6 +1762,10 @@ func syncDependentResource(ctx context.Context, c interface {
 	depResultCountTotal := 0
 	depParentsWithResultCount := 0
 	depWalkTruncated := false
+	// PATCH(pagination-headers): distinct storage keys landed for the parent
+	// being walked, and whether this pull carried an incremental window.
+	depLanded := newLandedIDs()
+	depWindowedPull := depSinceTS != ""
 	parentFKKey := dep.ParentTable + "_id"
 
 	for idx, parentRow := range parentRows {
@@ -1774,7 +1789,7 @@ func syncDependentResource(ctx context.Context, c interface {
 		// PATCH(pagination-headers): per-(company, resource) row count and
 		// early-exit flag for the completeness check after this parent's walk.
 		pageSink.Reset()
-		parentCount := 0
+		depLanded.Reset() // PATCH(pagination-headers)
 		parentTruncated := false
 
 		for {
@@ -1890,6 +1905,7 @@ func syncDependentResource(ctx context.Context, c interface {
 				break
 			}
 
+			depLanded.addBatch(dep.Name, items) // PATCH(pagination-headers)
 			depConsumedTotal += len(items)
 			depExtractFailureTotal += extractFailures
 			// Order matches the flat path (syncResource): all-fail first,
@@ -1913,7 +1929,6 @@ func syncDependentResource(ctx context.Context, c interface {
 			}
 
 			totalCount += stored
-			parentCount += stored // PATCH(pagination-headers)
 			if resourceSupportsPagination(dep.Name) && nextCursor == "" && pageSize.cursorParam != "offset" && len(items) >= pageSize.limit && pageMayHaveMore(data) {
 				emitSyncMissingPaginationCursorWarning(syncEvents, humanFriendly, dep.Name, parentID)
 			}
@@ -1971,8 +1986,8 @@ func syncDependentResource(ctx context.Context, c interface {
 		if parentPageInfo.HasResultCount {
 			depParentsWithResultCount++
 			depResultCountTotal += parentPageInfo.ResultCount
-			if !parentTruncated && parentCount != parentPageInfo.ResultCount {
-				emitResultCountMismatch(syncEvents, dep.Name, parentID, parentPageInfo.ResultCount, parentCount)
+			if !parentTruncated && depLanded.Len() != parentPageInfo.ResultCount {
+				emitResultCountMismatch(syncEvents, dep.Name, parentID, parentPageInfo.ResultCount, depLanded.Len())
 			}
 		}
 		if parentTruncated {
@@ -1992,7 +2007,7 @@ func syncDependentResource(ctx context.Context, c interface {
 	// PATCH(pagination-headers): only a run that walked every parent to the end
 	// with the header present produces a number on the same scale as
 	// total_count, which is mirror-wide (issue #15).
-	recordSyncResultCount(db, dep.Name, depResultCountTotal, syncResultCountComparable(depParentsWithResultCount == len(parentRows), depWalkTruncated))
+	recordSyncResultCount(db, dep.Name, depResultCountTotal, shouldRecordResultCount(depParentsWithResultCount == len(parentRows), depWalkTruncated, depWindowedPull))
 
 	// F4b symptom probe: items consumed and extracted but nothing landed.
 	// See syncResource for rationale.

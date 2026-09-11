@@ -36,6 +36,14 @@ type syncTestEnv struct {
 
 func newSyncTestEnv(t *testing.T, rows int) *syncTestEnv {
 	t.Helper()
+	return newSyncTestEnvWithParents(t, rows, true)
+}
+
+// newSyncTestEnvWithParents is newSyncTestEnv with control over whether the
+// mirror holds the parent company at all: a dependent resource against an
+// empty parent table is the state a first-ever run is in.
+func newSyncTestEnvWithParents(t *testing.T, rows int, seedCompany bool) *syncTestEnv {
+	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
@@ -65,10 +73,12 @@ func newSyncTestEnv(t *testing.T, rows int) *syncTestEnv {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	if _, _, err := db.UpsertBatch("companies", []json.RawMessage{
-		json.RawMessage(`{"slug":"testco","name":"Test Company","testCompany":true}`),
-	}); err != nil {
-		t.Fatalf("seed companies: %v", err)
+	if seedCompany {
+		if _, _, err := db.UpsertBatch("companies", []json.RawMessage{
+			json.RawMessage(`{"slug":"testco","name":"Test Company","testCompany":true}`),
+		}); err != nil {
+			t.Fatalf("seed companies: %v", err)
+		}
 	}
 	_ = db.Close()
 
@@ -204,5 +214,52 @@ func TestSync_UnknownResourceEmitsNamedSyncError(t *testing.T) {
 	}
 	if got, _ := summary["resources"].(float64); int(got) != 1 {
 		t.Fatalf("sync_summary resources = %v, want 1\n%s", summary["resources"], env.out.String())
+	}
+}
+
+// TestSync_DependentWithEmptyParentTableWarns is the follow-up the #14 skip
+// exposed: with the flat pool no longer claiming the name, `sync --resources
+// journal_entries` against a mirror that has no companies row reported
+// "resources: 1, success: 1, errored: 0" and exited 0 — a machine-mode caller
+// could not tell it from a run that genuinely had nothing to fetch. It must
+// warn, by name, with the fix in the event.
+func TestSync_DependentWithEmptyParentTableWarns(t *testing.T) {
+	env := newSyncTestEnvWithParents(t, 3, false)
+
+	// The exit policy itself is untouched: a warned resource is not an error,
+	// but this run has no successes at all, so the pre-existing "nothing
+	// synced" rule (all-warned exits non-zero) applies — which is the honest
+	// answer for a run that could not sync anything.
+	err := env.run(t, "--resources", "journal_entries")
+	if err == nil || !strings.Contains(err.Error(), "skipped") {
+		t.Fatalf("sync --resources journal_entries error = %v, want the all-warned exit\n%s", err, env.out.String())
+	}
+
+	events := env.events(t)
+	var warning map[string]any
+	for _, ev := range eventsOfType(events, "sync_warning") {
+		if ev["reason"] == "parent_table_empty" {
+			warning = ev
+		}
+	}
+	if warning == nil {
+		t.Fatalf("no parent_table_empty sync_warning\n%s", env.out.String())
+	}
+	if warning["resource"] != "journal_entries" {
+		t.Fatalf("warning resource = %v, want journal_entries", warning["resource"])
+	}
+	if warning["parent_table"] != "companies" {
+		t.Fatalf("warning parent_table = %v, want companies", warning["parent_table"])
+	}
+	if hint, _ := warning["hint"].(string); !strings.Contains(hint, "--resources companies") {
+		t.Fatalf("warning hint = %v, want the companies-first fix", warning["hint"])
+	}
+
+	summary := eventsOfType(events, "sync_summary")[0]
+	for key, want := range map[string]int{"resources": 1, "success": 0, "warned": 1, "errored": 0} {
+		got, ok := summary[key].(float64)
+		if !ok || int(got) != want {
+			t.Fatalf("sync_summary %s = %v, want %d\n%s", key, summary[key], want, env.out.String())
+		}
 	}
 }

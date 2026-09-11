@@ -17,10 +17,12 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -357,10 +359,276 @@ func TestDoctorCacheReport_ShowsRecordedResultCount(t *testing.T) {
 	if accounts == nil || companies == nil {
 		t.Fatalf("cache report resources = %v, want accounts and companies", resources)
 	}
-	if got, ok := accounts["result_count"].(int); !ok || got != 250 {
+	if got, ok := accounts["result_count"].(int64); !ok || got != 250 {
 		t.Fatalf("accounts result_count = %v, want 250", accounts["result_count"])
 	}
 	if _, ok := companies["result_count"]; ok {
 		t.Fatalf("companies carried a result_count without a recorded one: %v", companies)
+	}
+}
+
+// rowServer serves a fixed list of row bodies as 0-based pages of bare JSON
+// arrays, with Fiken's header block claiming `claimed` results. Unlike
+// pageServer it takes the rows verbatim, so a test can serve the same id twice
+// or two ids that collapse onto one storage key.
+type rowServer struct {
+	rows     []string
+	pageSize int
+	claimed  int
+
+	mu     sync.Mutex
+	params []url.Values
+}
+
+func (s *rowServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	s.params = append(s.params, r.URL.Query())
+	s.mu.Unlock()
+
+	page := 0
+	if raw := r.URL.Query().Get("page"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil {
+			http.Error(w, "bad page", http.StatusBadRequest)
+			return
+		}
+		page = n
+	}
+	size := s.pageSize
+	if v := r.URL.Query().Get("pageSize"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			size = n
+		}
+	}
+	start := page * size
+	if start > len(s.rows) {
+		start = len(s.rows)
+	}
+	end := start + size
+	if end > len(s.rows) {
+		end = len(s.rows)
+	}
+	items := make([]json.RawMessage, 0, end-start)
+	for _, row := range s.rows[start:end] {
+		items = append(items, json.RawMessage(row))
+	}
+	body, _ := json.Marshal(items)
+	pageCount := 0
+	if size > 0 {
+		pageCount = (s.claimed + size - 1) / size
+	}
+	w.Header().Set(client.HeaderPage, strconv.Itoa(page))
+	w.Header().Set(client.HeaderPageSize, strconv.Itoa(size))
+	w.Header().Set(client.HeaderPageCount, strconv.Itoa(pageCount))
+	w.Header().Set(client.HeaderResultCount, strconv.Itoa(s.claimed))
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(body)
+}
+
+func (s *rowServer) requestParams() []url.Values {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]url.Values, len(s.params))
+	copy(out, s.params)
+	return out
+}
+
+func newRowServer(t *testing.T, rows []string, pageSize, claimed int) (*rowServer, *client.Client) {
+	t.Helper()
+	rs := &rowServer{rows: rows, pageSize: pageSize, claimed: claimed}
+	srv := httptest.NewServer(rs)
+	t.Cleanup(srv.Close)
+	c := client.New(&config.Config{BaseURL: srv.URL, AccessToken: "test-token"}, 10*time.Second, 0)
+	c.NoCache = true
+	return rs, c
+}
+
+func companyRows(slugs ...string) []string {
+	rows := make([]string, 0, len(slugs))
+	for i, slug := range slugs {
+		rows = append(rows, fmt.Sprintf(`{"slug":%q,"name":"Company %d"}`, slug, i))
+	}
+	return rows
+}
+
+// TestSyncResource_DuplicateIDAcrossPagesIsNotAnAnomaly: the API serves 251
+// items whose 251st repeats an id from page one, so 250 distinct rows land
+// against a claimed 250. Counting items (UpsertBatch's `stored`) reported 251
+// and invented an anomaly on a perfect mirror; counting distinct storage keys
+// reports 250 and stays quiet.
+func TestSyncResource_DuplicateIDAcrossPagesIsNotAnAnomaly(t *testing.T) {
+	slugs := make([]string, 0, 251)
+	for i := 0; i < 250; i++ {
+		slugs = append(slugs, fmt.Sprintf("co-%03d", i))
+	}
+	// The duplicate sits on the far side of a page boundary, which is how a
+	// collection that shifts under a concurrent write serves one twice.
+	slugs = append(slugs[:100], append([]string{"co-000"}, slugs[100:]...)...)
+	_, c := newRowServer(t, companyRows(slugs...), 100, 250)
+	db := openTestStore(t)
+	var events bytes.Buffer
+
+	res := syncResource(context.Background(), c, db, "companies", "", true, 0, false, nil, &events)
+	if res.Err != nil {
+		t.Fatalf("syncResource: %v", res.Err)
+	}
+	if anomalies := countAnomalies(t, events.String(), "result_count_mismatch"); len(anomalies) != 0 {
+		t.Fatalf("a duplicate id produced %d result_count_mismatch events on a complete mirror\n%s", len(anomalies), events.String())
+	}
+	if got, err := db.Count("companies"); err != nil || got != 250 {
+		t.Fatalf("mirror rows = (%d, %v), want (250, nil)", got, err)
+	}
+	if got, ok := db.SyncResultCount("companies"); !ok || got != 250 {
+		t.Fatalf("recorded result count = (%d, %v), want (250, true)", got, ok)
+	}
+}
+
+// TestSyncResource_CollapsedStorageKeysEmitAnomaly is the issue #12 failure
+// class the item counter could not see: the API serves 250 items, two of them
+// collapse onto one storage key, the mirror holds 249 — and the anomaly says
+// so, with rows 249.
+func TestSyncResource_CollapsedStorageKeysEmitAnomaly(t *testing.T) {
+	slugs := make([]string, 0, 250)
+	for i := 0; i < 250; i++ {
+		slugs = append(slugs, fmt.Sprintf("co-%03d", i))
+	}
+	slugs[249] = slugs[0] // two items, one row
+	_, c := newRowServer(t, companyRows(slugs...), 100, 250)
+	db := openTestStore(t)
+	var events bytes.Buffer
+
+	res := syncResource(context.Background(), c, db, "companies", "", true, 0, false, nil, &events)
+	if res.Err != nil {
+		t.Fatalf("syncResource: %v", res.Err)
+	}
+	if got, err := db.Count("companies"); err != nil || got != 249 {
+		t.Fatalf("mirror rows = (%d, %v), want (249, nil)", got, err)
+	}
+	anomalies := countAnomalies(t, events.String(), "result_count_mismatch")
+	if len(anomalies) != 1 {
+		t.Fatalf("result_count_mismatch events = %d, want exactly 1\n%s", len(anomalies), events.String())
+	}
+	if got, _ := anomalies[0]["result_count"].(float64); int(got) != 250 {
+		t.Fatalf("anomaly result_count = %v, want 250", anomalies[0]["result_count"])
+	}
+	if got, _ := anomalies[0]["rows"].(float64); int(got) != 249 {
+		t.Fatalf("anomaly rows = %v, want 249", anomalies[0]["rows"])
+	}
+}
+
+// TestShouldRecordResultCount pins the recording decision as a pure function:
+// only a complete, unscoped, unwindowed walk that saw the header may overwrite
+// sync_state.result_count.
+func TestShouldRecordResultCount(t *testing.T) {
+	cases := []struct {
+		name                      string
+		seen, truncated, windowed bool
+		companyScope              string
+		want                      bool
+	}{
+		{name: "complete unwindowed walk", seen: true, want: true},
+		{name: "no header seen", want: false},
+		{name: "truncated walk", seen: true, truncated: true, want: false},
+		{name: "windowed walk", seen: true, windowed: true, want: false},
+		{name: "company scoped", seen: true, companyScope: "testco", want: false},
+		{name: "windowed and truncated", seen: true, truncated: true, windowed: true, want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			prev := syncCompanyScope
+			syncCompanyScope = tc.companyScope
+			t.Cleanup(func() { syncCompanyScope = prev })
+			if got := shouldRecordResultCount(tc.seen, tc.truncated, tc.windowed); got != tc.want {
+				t.Fatalf("shouldRecordResultCount(%v, %v, %v) with scope %q = %v, want %v",
+					tc.seen, tc.truncated, tc.windowed, tc.companyScope, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSyncResource_WindowedPullKeepsRecordedResultCount is the reason the
+// windowed flag exists: Fiken answers a filtered request with the Result-Count
+// of the FILTERED set, so an incremental run must not overwrite the
+// full-collection number with it (doctor would read rows 577 / result_count 3).
+// The per-pull mismatch check still runs — header and rows describe the same
+// filtered set — and an unwindowed run still records.
+func TestSyncResource_WindowedPullKeepsRecordedResultCount(t *testing.T) {
+	db := openTestStore(t)
+	if err := db.SaveSyncResultCount("companies", 577); err != nil {
+		t.Fatalf("SaveSyncResultCount: %v", err)
+	}
+
+	// The temporal filter issue #13 will map. Installed here so the windowed
+	// path can be driven before that mapping exists.
+	prev := syncSinceParamResolver
+	syncSinceParamResolver = func(resource string) string {
+		if resource == "companies" {
+			return "lastModifiedGe"
+		}
+		return ""
+	}
+	t.Cleanup(func() { syncSinceParamResolver = prev })
+
+	// The window claims 3 changed rows and serves 2: short, so the comparison
+	// must still speak up.
+	rs, c := newRowServer(t, companyRows("co-000", "co-001"), 100, 3)
+	var events bytes.Buffer
+	res := syncResource(context.Background(), c, db, "companies", "2026-01-01T00:00:00Z", true, 0, false, nil, &events)
+	if res.Err != nil {
+		t.Fatalf("syncResource: %v", res.Err)
+	}
+	params := rs.requestParams()
+	if len(params) == 0 || params[0].Get("lastModifiedGe") != "2026-01-01T00:00:00Z" {
+		t.Fatalf("request params = %v, want lastModifiedGe on the first request", params)
+	}
+	if anomalies := countAnomalies(t, events.String(), "result_count_mismatch"); len(anomalies) != 1 {
+		t.Fatalf("windowed short pull emitted %d result_count_mismatch events, want 1\n%s", len(anomalies), events.String())
+	}
+	if got, ok := db.SyncResultCount("companies"); !ok || got != 577 {
+		t.Fatalf("recorded result count after a windowed pull = (%d, %v), want (577, true)", got, ok)
+	}
+
+	// The control: without a window the same walker records what it sees.
+	syncSinceParamResolver = nil
+	_, c2 := newRowServer(t, companyRows("co-000", "co-001"), 100, 2)
+	var fullEvents bytes.Buffer
+	if res := syncResource(context.Background(), c2, db, "companies", "", true, 0, false, nil, &fullEvents); res.Err != nil {
+		t.Fatalf("unwindowed syncResource: %v", res.Err)
+	}
+	if got, ok := db.SyncResultCount("companies"); !ok || got != 2 {
+		t.Fatalf("recorded result count after an unwindowed pull = (%d, %v), want (2, true)", got, ok)
+	}
+}
+
+// TestPaginatedRead_EmptyCollectionPublishesZeroCounts: Fiken answers an empty
+// collection with Page-Count: 0 / Result-Count: 0. Both are real claims about
+// the collection, so both must be published — gating page_count on "> 0"
+// silently dropped the one case where the count matters most.
+func TestPaginatedRead_EmptyCollectionPublishesZeroCounts(t *testing.T) {
+	_, c := newRowServer(t, nil, 100, 0)
+	flags := &rootFlags{dataSource: "live"}
+
+	data, prov, err := resolvePaginatedReadWithStrategy(context.Background(), c, flags, "live", "accounts",
+		"/companies/testco/accounts", map[string]string{"page": "0", "pageSize": "100"}, nil,
+		false, "page", "page", "pageSize", "", "", io.Discard)
+	if err != nil {
+		t.Fatalf("resolvePaginatedReadWithStrategy: %v", err)
+	}
+	if prov.PageCount == nil || *prov.PageCount != 0 {
+		t.Fatalf("provenance page count = %v, want a published 0", prov.PageCount)
+	}
+	if prov.ResultCount == nil || *prov.ResultCount != 0 {
+		t.Fatalf("provenance result count = %v, want a published 0", prov.ResultCount)
+	}
+	envelope, err := wrapWithProvenance(data, prov)
+	if err != nil {
+		t.Fatalf("wrapWithProvenance: %v", err)
+	}
+	meta := metaOf(t, envelope)
+	if got, ok := meta["page_count"].(float64); !ok || int(got) != 0 {
+		t.Fatalf("meta.page_count = %v, want 0", meta["page_count"])
+	}
+	if got, ok := meta["result_count"].(float64); !ok || int(got) != 0 {
+		t.Fatalf("meta.result_count = %v, want 0", meta["result_count"])
 	}
 }

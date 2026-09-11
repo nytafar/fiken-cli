@@ -38,14 +38,16 @@ func headerServer(t *testing.T, page, pageSize, pageCount, resultCount int, body
 	return c
 }
 
-// TestGetPage_ParsesFikenPaginationHeaders is the core of issue #15: the body
-// comes back as before and the four headers arrive parsed alongside it.
-func TestGetPage_ParsesFikenPaginationHeaders(t *testing.T) {
+// TestSinkedGet_ParsesFikenPaginationHeaders is the core of issue #15: the
+// body comes back as before and the four headers arrive parsed alongside it,
+// through the one patched line in the generated request path.
+func TestSinkedGet_ParsesFikenPaginationHeaders(t *testing.T) {
 	c := headerServer(t, 0, 100, 3, 250, `[{"code":"1500"},{"code":"1501"}]`)
 
-	data, info, err := c.GetPage(context.Background(), "/companies/testco/accounts", nil)
+	ctx, sink := NewPageInfoContext(context.Background())
+	data, err := c.Get(ctx, "/companies/testco/accounts", nil)
 	if err != nil {
-		t.Fatalf("GetPage: %v", err)
+		t.Fatalf("Get: %v", err)
 	}
 	var items []json.RawMessage
 	if err := json.Unmarshal(data, &items); err != nil {
@@ -54,17 +56,18 @@ func TestGetPage_ParsesFikenPaginationHeaders(t *testing.T) {
 	if len(items) != 2 {
 		t.Fatalf("items = %d, want 2", len(items))
 	}
-	if !info.Present || !info.HasResultCount {
-		t.Fatalf("PageInfo = %+v, want Present and HasResultCount", info)
+	info := sink.PageInfo()
+	if !info.Present || !info.HasResultCount || !info.HasPageCount {
+		t.Fatalf("PageInfo = %+v, want Present, HasResultCount and HasPageCount", info)
 	}
 	if info.Page != 0 || info.PageSize != 100 || info.PageCount != 3 || info.ResultCount != 250 {
 		t.Fatalf("PageInfo = %+v, want {0 100 3 250}", info)
 	}
 }
 
-// TestGetPage_NoHeadersIsAbsentNotZero keeps a header-less response from
+// TestSinkedGet_NoHeadersIsAbsentNotZero keeps a header-less response from
 // claiming the collection holds zero rows.
-func TestGetPage_NoHeadersIsAbsentNotZero(t *testing.T) {
+func TestSinkedGet_NoHeadersIsAbsentNotZero(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`[]`))
@@ -73,12 +76,37 @@ func TestGetPage_NoHeadersIsAbsentNotZero(t *testing.T) {
 	c := New(&config.Config{BaseURL: srv.URL, AccessToken: "test-token"}, 10*time.Second, 0)
 	c.NoCache = true
 
-	_, info, err := c.GetPage(context.Background(), "/companies/testco/accounts", nil)
-	if err != nil {
-		t.Fatalf("GetPage: %v", err)
+	ctx, sink := NewPageInfoContext(context.Background())
+	if _, err := c.Get(ctx, "/companies/testco/accounts", nil); err != nil {
+		t.Fatalf("Get: %v", err)
 	}
-	if info.Present || info.HasResultCount || info != (PageInfo{}) {
+	info := sink.PageInfo()
+	if info.Present || info.HasResultCount || info.HasPageCount || info != (PageInfo{}) {
 		t.Fatalf("PageInfo = %+v, want the zero value", info)
+	}
+}
+
+// TestParsePageInfo_ZeroCountsArePresent is the empty-collection case: Fiken
+// answers an empty collection with Page-Count: 0 / Result-Count: 0, which is a
+// real claim about the collection and not the same as a missing header.
+func TestParsePageInfo_ZeroCountsArePresent(t *testing.T) {
+	h := http.Header{}
+	h.Set(HeaderPage, "0")
+	h.Set(HeaderPageSize, "100")
+	h.Set(HeaderPageCount, "0")
+	h.Set(HeaderResultCount, "0")
+
+	info := ParsePageInfo(h)
+	if !info.Present || !info.HasPageCount || !info.HasResultCount {
+		t.Fatalf("PageInfo = %+v, want every presence flag set", info)
+	}
+	if info.PageCount != 0 || info.ResultCount != 0 {
+		t.Fatalf("PageInfo = %+v, want zero counts", info)
+	}
+
+	bare := ParsePageInfo(http.Header{})
+	if bare.HasPageCount || bare.HasResultCount || bare.Present {
+		t.Fatalf("PageInfo of an empty header block = %+v, want the zero value", bare)
 	}
 }
 
