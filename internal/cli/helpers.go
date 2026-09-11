@@ -677,6 +677,18 @@ func paginatedGet(ctx context.Context, c interface {
 				clean[cursorParam] = next
 				continue
 			}
+			// PATCH(pagination-zero-based): a bare array carries no cursor and no
+			// has_more, so --all used to stop after the first page on a page-type
+			// API (issue #12). A full page advances the page number client-side,
+			// exactly as the offset branch above advances the offset.
+			if next, ok := nextFullPagePageCursor(clean, cursorParam, paginationType, limitParam, len(items)); ok {
+				if page >= paginatedGetMaxPages {
+					emitPaginatedGetMaxPagesWarning()
+					break
+				}
+				clean[cursorParam] = next
+				continue
+			}
 		} else {
 			// Response is an object - look for array inside
 			var obj map[string]json.RawMessage
@@ -766,6 +778,21 @@ func nextFullPageOffsetCursor(params map[string]string, cursorParam, paginationT
 	return nextClientSidePaginationCursor(params, cursorParam, paginationType, limitParam)
 }
 
+// PATCH(pagination-zero-based): sibling of nextFullPageOffsetCursor for
+// page-type pagination. A page-paginated endpoint that answers with a bare
+// array signals "more" only by returning a full page; without this, --all
+// returned page one and stopped (issue #12).
+func nextFullPagePageCursor(params map[string]string, cursorParam, paginationType, limitParam string, itemCount int) (string, bool) {
+	if paginationType != "page" || itemCount == 0 {
+		return "", false
+	}
+	limit, err := strconv.Atoi(params[limitParam])
+	if err != nil || limit <= 0 || itemCount < limit {
+		return "", false
+	}
+	return nextClientSidePaginationCursor(params, cursorParam, paginationType, limitParam)
+}
+
 func nextClientSidePaginationCursor(params map[string]string, cursorParam, paginationType, limitParam string) (string, bool) {
 	if cursorParam == "" {
 		return "", false
@@ -774,7 +801,10 @@ func nextClientSidePaginationCursor(params map[string]string, cursorParam, pagin
 	case "page":
 		current := params[cursorParam]
 		if current == "" {
-			current = "1"
+			// PATCH(pagination-zero-based): an unset cursor means the server
+			// served its own default page, which this API's spec declares as 0;
+			// assuming 1 here skipped a page (issue #12).
+			current = strconv.Itoa(determinePaginationDefaults().firstPage)
 		}
 		n, err := strconv.Atoi(current)
 		if err != nil {

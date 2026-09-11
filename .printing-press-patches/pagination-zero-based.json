@@ -1,0 +1,28 @@
+{
+  "schema_version": 2,
+  "id": "pagination-zero-based",
+  "applied_at": "2026-09-11",
+  "base_run_id": "20260609-145046",
+  "base_printing_press_version": "4.24.0",
+  "summary": "fix(pagination): walk 0-based pages from the spec default instead of skipping page 1 (issue #12)",
+  "reason": "Fiken's list endpoints declare `page` with default 0, so the cursor-less first request is served page 0 and the next page is 1. The printed page-int fallback in internal/cli/sync.go (syncResource and its copy in syncDependentResource) did `strconv.Atoi(cursor)` on the empty first cursor, clamped the result up to 1 and requested page 2, so page 1 of every paginated resource was never fetched: accounts landed 477 of 577 rows, journal_entries 100 of 163, in every company. Independently, internal/cli/helpers.go's paginatedGet only advanced offset-type pagination in its bare-array branch (nextFullPageOffsetCursor), and Fiken answers with bare arrays, so `--all` returned the first page and stopped. The fix keys the 0-based walk on the spec default rather than on a Fiken-specific branch: paginationDefaults gains a `firstPage` field that determinePaginationDefaults sets to the spec's `page` default (0), both sync.go fallbacks read the empty cursor as firstPage and advance current+1 (a short page still ends the loop), paginatedGet gains nextFullPagePageCursor as a page-type sibling of nextFullPageOffsetCursor, and nextClientSidePaginationCursor's unset-page default becomes the same spec default instead of the hard-coded 1. On a 1-based API the same code is correct once firstPage is printed as 1. Every company needs a full resync after this lands.",
+  "files": [
+    "internal/cli/sync.go",
+    "internal/cli/helpers.go",
+    "internal/cli/pagination_zero_based_test.go"
+  ],
+  "call_sites": [
+    "PATCH(pagination-zero-based)",
+    "firstPage int",
+    "firstPage: 0,",
+    "currentPage := pageSize.firstPage",
+    "func nextFullPagePageCursor(params map[string]string, cursorParam, paginationType, limitParam string, itemCount int) (string, bool) {",
+    "nextFullPagePageCursor(clean, cursorParam, paginationType, limitParam, len(items))",
+    "current = strconv.Itoa(determinePaginationDefaults().firstPage)",
+    "func TestSyncResource_WalksZeroBasedPagesFromPageZero(t *testing.T) {",
+    "func TestSyncDependentResource_WalksZeroBasedPagesFromPageZero(t *testing.T) {",
+    "func TestPaginatedGet_AllFollowsBareArrayPages(t *testing.T) {"
+  ],
+  "validated_outcome": "make check green (go vet ./..., go test ./..., scripts/check-boundaries.sh). Hand-authored tests in internal/cli/pagination_zero_based_test.go drive a httptest server serving 250 rows at page size 100 as bare JSON arrays: TestSyncResource_WalksZeroBasedPagesFromPageZero and TestSyncDependentResource_WalksZeroBasedPagesFromPageZero land 250 rows over pages <absent>,1,2 with page 1 requested exactly once; TestPaginatedGet_AllFollowsBareArrayPages returns 250 items over pages 0,1,2. Reverted-behaviour check: the same tests report 150 rows and 100 items on the pre-patch code. No live API call was made.",
+  "patch_count": 3
+}

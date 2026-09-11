@@ -549,10 +549,15 @@ func syncResource(ctx context.Context, c interface {
 		// 1 even though more pages exist (the original symptom in #1296).
 		// Guard on cursorType, not cursorParam name, so all canonical
 		// spellings (page / page_number / pageNumber / page[number]) work.
+		// PATCH(pagination-zero-based): the first request omits the cursor, so
+		// the server served pageSize.firstPage (the spec's default for the page
+		// parameter, 0 here). Atoi("") clamped to 1 and asked for page 2 next,
+		// so page 1 was never fetched (issue #12). Empty cursor means firstPage;
+		// the next page is current+1, and a short page ends the loop below.
 		if pageSize.cursorType == "page" && nextCursor == "" && len(items) >= pageSize.limit && pageAllowsPageIntFallback(data) {
-			currentPage, _ := strconv.Atoi(cursor)
-			if currentPage < 1 {
-				currentPage = 1
+			currentPage := pageSize.firstPage
+			if n, err := strconv.Atoi(cursor); err == nil {
+				currentPage = n
 			}
 			nextCursor = strconv.Itoa(currentPage + 1)
 			hasMore = true
@@ -773,6 +778,11 @@ type paginationDefaults struct {
 	cursorType  string // paginator class: "", "cursor", "page_token", "offset", "page"
 	limitParam  string
 	limit       int
+	// PATCH(pagination-zero-based): the spec default for the cursor parameter,
+	// i.e. the page the server serves when the request carries no cursor. This
+	// API declares `page` with default 0, so page numbering is 0-based and the
+	// page after the first is 1, not 2 (issue #12).
+	firstPage int
 }
 
 // determinePaginationDefaults returns the pagination parameter names to use.
@@ -783,6 +793,8 @@ func determinePaginationDefaults() paginationDefaults {
 		cursorType:  "page",
 		limitParam:  "pageSize",
 		limit:       100,
+		// PATCH(pagination-zero-based): spec default of the `page` parameter.
+		firstPage: 0,
 	}
 }
 
@@ -1757,10 +1769,15 @@ func syncDependentResource(ctx context.Context, c interface {
 			// Page-int paginator fallback: mirrors syncResource so dependent
 			// resources on integer ?page=N APIs also advance past page 1.
 			// Guard on cursorType to cover every canonical spelling.
+			// PATCH(pagination-zero-based): the first request omits the cursor, so
+			// the server served pageSize.firstPage (the spec's default for the page
+			// parameter, 0 here). Atoi("") clamped to 1 and asked for page 2 next,
+			// so page 1 was never fetched (issue #12). Empty cursor means firstPage;
+			// the next page is current+1, and a short page ends the loop below.
 			if pageSize.cursorType == "page" && nextCursor == "" && len(items) >= pageSize.limit && pageAllowsPageIntFallback(data) {
-				currentPage, _ := strconv.Atoi(cursor)
-				if currentPage < 1 {
-					currentPage = 1
+				currentPage := pageSize.firstPage
+				if n, err := strconv.Atoi(cursor); err == nil {
+					currentPage = n
 				}
 				nextCursor = strconv.Itoa(currentPage + 1)
 				hasMore = true
