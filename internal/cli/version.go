@@ -12,9 +12,10 @@ import (
 // version is the printed CLI's version, overridable at build time via ldflags
 // (.goreleaser.yaml injects -X fiken-cli/internal/cli.version).
 //
-// PATCH(release-2-0-0): 2.0.0 — the report envelope, period defaults and the
-// guarded-write exit code are breaking changes; see CHANGELOG.md. A reprint
-// resets this literal to the generator default.
+// PATCH(release-2-1-0): 2.1.0 — bumped in place at each release (2.0.0 was the
+// breaking one: report envelope, period defaults, guarded-write exit code; 2.1.0
+// fixes the page walk and adds the result-count check); see CHANGELOG.md. A
+// reprint resets this literal to the generator default.
 var version = "2.1.0"
 
 // newVersionCmd prints the CLI name and version. Shared by the HTTP and device
