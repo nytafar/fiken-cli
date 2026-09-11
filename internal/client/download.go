@@ -139,15 +139,62 @@ func sameHost(u *url.URL, baseURL string) bool {
 // filenameFromResponse prefers the server's Content-Disposition filename and
 // falls back to the last path segment of the URL. Returns "" when neither
 // yields a usable name; the caller decides the fallback.
+//
+// Either fallback can produce an extensionless name -- Fiken's document URLs
+// end in the numeric document id, so a response with no Content-Disposition
+// resolves to "42" for a file the Content-Type says is a PDF. The extension
+// is put back from the content type, because the name is what the CLI writes
+// to disk and a "bilag/42" that no viewer will open is not a downloaded PDF.
 func filenameFromResponse(resp *http.Response, u *url.URL) string {
+	contentType := resp.Header.Get("Content-Type")
 	if cd := resp.Header.Get("Content-Disposition"); cd != "" {
 		if _, params, err := mime.ParseMediaType(cd); err == nil {
 			if name := SanitizeFilename(params["filename"]); name != "" {
-				return name
+				return EnsureFilenameExtension(name, contentType)
 			}
 		}
 	}
-	return SanitizeFilename(path.Base(u.Path))
+	return EnsureFilenameExtension(SanitizeFilename(path.Base(u.Path)), contentType)
+}
+
+// EnsureFilenameExtension appends the extension implied by contentType when
+// name carries none. An empty name is left empty (the caller's fallback
+// decides), and an unknown content type adds nothing rather than guessing.
+func EnsureFilenameExtension(name, contentType string) string {
+	if name == "" || path.Ext(name) != "" {
+		return name
+	}
+	return name + extensionForContentType(contentType)
+}
+
+// extensionForContentType maps a response Content-Type to a file extension.
+// The four types Fiken actually serves for documents are mapped explicitly so
+// the answer is stable (mime.ExtensionsByType is seeded from the system
+// mime.types and would hand back ".jpe" or ".pdf" depending on the host);
+// anything else falls back to the system table, then to no extension.
+func extensionForContentType(contentType string) string {
+	mediaType := strings.ToLower(strings.TrimSpace(contentType))
+	if parsed, _, err := mime.ParseMediaType(contentType); err == nil {
+		mediaType = strings.ToLower(strings.TrimSpace(parsed))
+	}
+	switch mediaType {
+	case "":
+		return ""
+	case "application/pdf":
+		return ".pdf"
+	case "image/png":
+		return ".png"
+	case "image/jpeg", "image/jpg":
+		return ".jpg"
+	case "image/gif":
+		return ".gif"
+	}
+	exts, err := mime.ExtensionsByType(mediaType)
+	if err != nil || len(exts) == 0 {
+		return ""
+	}
+	// ExtensionsByType returns a sorted slice, so this is deterministic.
+	return exts[0]
 }
 
 // SanitizeFilename reduces a server- or metadata-supplied name to a

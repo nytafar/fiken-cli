@@ -88,9 +88,14 @@ func handleDocumentOutput(cmd *cobra.Command, flags *rootFlags, c *client.Client
 		return true, usageErr(fmt.Errorf("%s returned %d attachments; --output - streams a single file, give a directory instead", apiPath, len(refs)))
 	}
 
+	// Two attachments of one purchase are routinely uploaded under the same
+	// filename ("bilag.pdf" twice). Destinations already used by this run are
+	// tracked so the second one lands as "bilag-2.pdf" instead of silently
+	// overwriting the first while the JSON still reports count: 2.
+	taken := make(map[string]bool, len(refs))
 	results := make([]downloadedDocument, 0, len(refs))
 	for i, ref := range refs {
-		res, err := downloadDocumentRef(cmd, c, target, ref, i, len(refs) > 1)
+		res, err := downloadDocumentRef(cmd, c, target, ref, i, len(refs) > 1, taken)
 		if err != nil {
 			return true, err
 		}
@@ -105,7 +110,7 @@ func handleDocumentOutput(cmd *cobra.Command, flags *rootFlags, c *client.Client
 // directory so an interrupted download never leaves a half-written PDF under
 // the final name, and so a filename the server supplies (Content-Disposition)
 // can still be used when the metadata carried none.
-func downloadDocumentRef(cmd *cobra.Command, c *client.Client, target string, ref documentRef, index int, multiple bool) (downloadedDocument, error) {
+func downloadDocumentRef(cmd *cobra.Command, c *client.Client, target string, ref documentRef, index int, multiple bool, taken map[string]bool) (downloadedDocument, error) {
 	if target == "-" {
 		got, err := c.DownloadFile(cmd.Context(), ref.URL, cmd.OutOrStdout())
 		if err != nil {
@@ -141,15 +146,40 @@ func downloadDocumentRef(cmd *cobra.Command, c *client.Client, target string, re
 	if name == "" {
 		name = documentFilename(ref, got, index)
 	}
-	dest := filepath.Join(dir, name)
+	dest := uniqueDestination(dir, name, taken)
+	name = filepath.Base(dest)
 	if err := os.Rename(tmpName, dest); err != nil {
 		_ = os.Remove(tmpName)
 		return downloadedDocument{}, fmt.Errorf("writing %s: %w", dest, err)
 	}
+	// The bytes are in place under the final name; a mode that stayed at the
+	// temp file's 0600 is worth a warning, not a failed download.
 	if err := os.Chmod(dest, 0o644); err != nil {
-		return downloadedDocument{}, fmt.Errorf("setting mode on %s: %w", dest, err)
+		fmt.Fprintf(cmd.ErrOrStderr(), "warning: wrote %s but could not set its mode: %v\n", dest, err)
 	}
 	return downloadedDocument{Path: dest, Bytes: got.Bytes, Filename: name}, nil
+}
+
+// uniqueDestination reserves a path under dir for name, suffixing -2, -3, ...
+// before the extension when this run has already claimed it. Only names taken
+// by the run itself are avoided: an --output directory the operator is
+// re-downloading into is meant to be overwritten, two files of one download
+// are not.
+func uniqueDestination(dir, name string, taken map[string]bool) string {
+	dest := filepath.Join(dir, name)
+	if !taken[dest] {
+		taken[dest] = true
+		return dest
+	}
+	ext := filepath.Ext(name)
+	stem := strings.TrimSuffix(name, ext)
+	for i := 2; ; i++ {
+		candidate := filepath.Join(dir, fmt.Sprintf("%s-%d%s", stem, i, ext))
+		if !taken[candidate] {
+			taken[candidate] = true
+			return candidate
+		}
+	}
 }
 
 // splitDownloadTarget decides whether --output named a file or a directory.
@@ -175,7 +205,7 @@ func documentFilename(ref documentRef, got client.DownloadedFile, index int) str
 	if name := client.SanitizeFilename(got.Filename); name != "" {
 		return name
 	}
-	return fmt.Sprintf("document-%d", index+1)
+	return client.EnsureFilenameExtension(fmt.Sprintf("document-%d", index+1), got.ContentType)
 }
 
 // collectDocumentRefs reads every document URL out of a metadata payload.

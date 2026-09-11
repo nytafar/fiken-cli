@@ -13,6 +13,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -90,6 +91,101 @@ func TestDownloadFile_ErrorStatusIsAnAPIError(t *testing.T) {
 	}
 	if buf.Len() != 0 {
 		t.Fatalf("error body was written to the sink: %q", buf.String())
+	}
+}
+
+// A Fiken document URL ends in the document id and the response often
+// carries no Content-Disposition, so the name resolves to "42". Writing that
+// to disk gives an extensionless file no viewer opens, when the response said
+// application/pdf all along.
+func TestDownloadFile_ExtensionlessNameTakesItFromContentType(t *testing.T) {
+	cases := []struct {
+		name        string
+		contentType string
+		path        string
+		want        string
+	}{
+		{"pdf", "application/pdf", "/companies/agensia/inbox/42/document", "document.pdf"},
+		{"pdf from url id", "application/pdf; charset=binary", "/download/42", "42.pdf"},
+		{"png", "image/png", "/download/7", "7.png"},
+		{"jpeg", "image/jpeg", "/download/7", "7.jpg"},
+		{"gif", "image/gif", "/download/7", "7.gif"},
+		{"unknown type adds nothing", "application/x-nonsense-nothing", "/download/7", "7"},
+		{"no content type adds nothing", "", "/download/7", "7"},
+		{"existing extension is kept", "application/pdf", "/download/faktura.xml", "faktura.xml"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if tc.contentType == "" {
+					// Go sniffs a Content-Type for a written body unless it
+					// is told not to.
+					w.Header()["Content-Type"] = nil
+				} else {
+					w.Header().Set("Content-Type", tc.contentType)
+				}
+				_, _ = w.Write([]byte("%PDF-1.4 body"))
+			}))
+			defer srv.Close()
+
+			c := New(&config.Config{BaseURL: srv.URL, AccessToken: "test-token"}, 10*time.Second, 0)
+
+			var buf bytes.Buffer
+			got, err := c.DownloadFile(context.Background(), srv.URL+tc.path, &buf)
+			if err != nil {
+				t.Fatalf("DownloadFile: %v", err)
+			}
+			if got.Filename != tc.want {
+				t.Fatalf("filename = %q, want %q (Content-Type %q)", got.Filename, tc.want, tc.contentType)
+			}
+		})
+	}
+}
+
+// A Content-Disposition name is trusted for the stem but still gets the
+// extension the content type implies when it has none.
+func TestDownloadFile_ContentDispositionNameGetsExtension(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/pdf")
+		w.Header().Set("Content-Disposition", `attachment; filename="faktura-123"`)
+		_, _ = w.Write([]byte("%PDF-1.4 body"))
+	}))
+	defer srv.Close()
+
+	c := New(&config.Config{BaseURL: srv.URL, AccessToken: "test-token"}, 10*time.Second, 0)
+
+	var buf bytes.Buffer
+	got, err := c.DownloadFile(context.Background(), srv.URL+"/download/1", &buf)
+	if err != nil {
+		t.Fatalf("DownloadFile: %v", err)
+	}
+	if got.Filename != "faktura-123.pdf" {
+		t.Fatalf("filename = %q, want %q", got.Filename, "faktura-123.pdf")
+	}
+}
+
+func TestEnsureFilenameExtension(t *testing.T) {
+	cases := []struct {
+		name        string
+		contentType string
+		want        string
+	}{
+		{"42", "application/pdf", "42.pdf"},
+		{"42.pdf", "image/png", "42.pdf"},
+		{"", "application/pdf", ""},
+		{"scan", "application/x-nonsense-nothing", "scan"},
+	}
+	for _, tc := range cases {
+		got := EnsureFilenameExtension(tc.name, tc.contentType)
+		if got != tc.want {
+			t.Fatalf("EnsureFilenameExtension(%q, %q) = %q, want %q", tc.name, tc.contentType, got, tc.want)
+		}
+	}
+
+	// Outside the explicit map the system mime table decides, so only the
+	// shape is host-independent: some extension, one path element.
+	if got := EnsureFilenameExtension("scan", "text/plain; charset=utf-8"); !strings.HasPrefix(got, "scan.") {
+		t.Fatalf("EnsureFilenameExtension(\"scan\", \"text/plain\") = %q, want a text extension from the system mime table", got)
 	}
 }
 

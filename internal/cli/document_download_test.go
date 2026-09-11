@@ -13,6 +13,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -23,6 +24,12 @@ import (
 )
 
 var pdfBytes = []byte("%PDF-1.4\n%\xe2\xe3\xcf\xd3\nfaktura\n%%EOF\n")
+
+// dupBytes gives the two same-named attachments distinguishable bodies, so a
+// test can tell "both landed" from "the second overwrote the first".
+func dupBytes(n int) []byte {
+	return []byte(fmt.Sprintf("%%PDF-1.4\nattachment-%d\n%%%%EOF\n", n))
+}
 
 // docServer is a fake Fiken: one inbox document, one purchase with two
 // attachments, and the files behind their URLs.
@@ -50,13 +57,35 @@ func (d *docServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "/companies/agensia/inbox/42":
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"inboxDocumentId":42,"name":"Faktura","filename":"faktura-123.pdf","documentUrl":"` + d.baseURL + `/download/inbox/42"}`))
+	case "/companies/agensia/inbox/43":
+		// No filename and no name: the only thing this document can be
+		// named after is its URL's last segment and its content type.
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"inboxDocumentId":43,"documentUrl":"` + d.baseURL + `/download/inbox/43"}`))
 	case "/companies/agensia/purchases/7/attachments":
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`[{"identifier":"24760","filename":"bilag-a.pdf","downloadUrl":"` + d.baseURL + `/download/att/a"},` +
 			`{"identifier":"24761","filename":"bilag-b.pdf","downloadUrl":"` + d.baseURL + `/download/att/b"}]`))
+	case "/companies/agensia/purchases/8/attachments":
+		// Fiken lets two attachments of one purchase carry the same
+		// filename; a scanner that names everything "bilag.pdf" is the
+		// normal case, not a corner one.
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"identifier":"24762","filename":"bilag.pdf","downloadUrl":"` + d.baseURL + `/download/dup/1"},` +
+			`{"identifier":"24763","filename":"bilag.pdf","downloadUrl":"` + d.baseURL + `/download/dup/2"}]`))
 	case "/download/inbox/42", "/download/att/a", "/download/att/b":
 		w.Header().Set("Content-Type", "application/pdf")
 		_, _ = w.Write(pdfBytes)
+	case "/download/inbox/43":
+		// No Content-Disposition either: the name has to come from the URL.
+		w.Header().Set("Content-Type", "application/pdf")
+		_, _ = w.Write(pdfBytes)
+	case "/download/dup/1":
+		w.Header().Set("Content-Type", "application/pdf")
+		_, _ = w.Write(dupBytes(1))
+	case "/download/dup/2":
+		w.Header().Set("Content-Type", "application/pdf")
+		_, _ = w.Write(dupBytes(2))
 	default:
 		http.Error(w, "not found", http.StatusNotFound)
 	}
@@ -226,6 +255,113 @@ func TestPurchasesAttachmentsGet_OutputDownloadsEveryAttachment(t *testing.T) {
 			names = append(names, e.Name())
 		}
 		t.Fatalf("directory holds %v, want exactly the two attachments", names)
+	}
+}
+
+// Two attachments named "bilag.pdf" used to resolve to one destination: the
+// second os.Rename overwrote the first while the JSON still said count: 2.
+// Both files must be on disk, and files[] must name what is actually there.
+func TestPurchasesAttachmentsGet_SameFilenameTwiceKeepsBothFiles(t *testing.T) {
+	dir := t.TempDir()
+
+	_, out, _, err := runCLI(t, "purchases", "attachments", "get-purchase", "agensia", "8", "--output", dir)
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	want := map[string][]byte{
+		filepath.Join(dir, "bilag.pdf"):   dupBytes(1),
+		filepath.Join(dir, "bilag-2.pdf"): dupBytes(2),
+	}
+	for path, body := range want {
+		got, readErr := os.ReadFile(path)
+		if readErr != nil {
+			t.Fatalf("read %s: %v (stdout %q)", path, readErr, out)
+		}
+		if !bytes.Equal(got, body) {
+			t.Fatalf("%s = %q, want %q", path, got, body)
+		}
+	}
+
+	entries, dirErr := os.ReadDir(dir)
+	if dirErr != nil {
+		t.Fatalf("read dir: %v", dirErr)
+	}
+	if len(entries) != 2 {
+		names := []string{}
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("directory holds %v, want both attachments and nothing else", names)
+	}
+
+	var listed struct {
+		Files []downloadedDocument `json:"files"`
+		Count int                  `json:"count"`
+	}
+	if jsonErr := json.Unmarshal([]byte(strings.TrimSpace(out)), &listed); jsonErr != nil {
+		t.Fatalf("stdout %q is not the {files,...} envelope: %v", out, jsonErr)
+	}
+	if listed.Count != 2 || len(listed.Files) != 2 {
+		t.Fatalf("count = %d, files = %d, want 2 and 2", listed.Count, len(listed.Files))
+	}
+	for _, f := range listed.Files {
+		if _, statErr := os.Stat(f.Path); statErr != nil {
+			t.Fatalf("files[] reports %s, which is not on disk: %v", f.Path, statErr)
+		}
+		if f.Filename != filepath.Base(f.Path) {
+			t.Fatalf("files[] filename %q does not match path %q", f.Filename, f.Path)
+		}
+	}
+	if listed.Files[0].Path == listed.Files[1].Path {
+		t.Fatalf("both attachments report the same path %q", listed.Files[0].Path)
+	}
+}
+
+// A document with no filename in its metadata and no Content-Disposition on
+// the download is named after the URL's last segment -- "43" -- which without
+// the content type's extension is a PDF nothing will open.
+func TestInboxGetDocument_NamelessDocumentGetsContentTypeExtension(t *testing.T) {
+	dir := t.TempDir()
+
+	_, out, _, err := runCLI(t, "inbox", "get-document", "agensia", "43", "--output", dir+string(os.PathSeparator))
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	want := filepath.Join(dir, "43.pdf")
+	if _, statErr := os.Stat(want); statErr != nil {
+		entries, _ := os.ReadDir(dir)
+		names := []string{}
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("want %s written, directory holds %v (stdout %q)", want, names, out)
+	}
+}
+
+func TestUniqueDestination(t *testing.T) {
+	taken := map[string]bool{}
+	got := []string{
+		uniqueDestination("/out", "bilag.pdf", taken),
+		uniqueDestination("/out", "bilag.pdf", taken),
+		uniqueDestination("/out", "bilag.pdf", taken),
+		uniqueDestination("/out", "other.pdf", taken),
+		uniqueDestination("/out", "noext", taken),
+		uniqueDestination("/out", "noext", taken),
+	}
+	want := []string{
+		filepath.Join("/out", "bilag.pdf"),
+		filepath.Join("/out", "bilag-2.pdf"),
+		filepath.Join("/out", "bilag-3.pdf"),
+		filepath.Join("/out", "other.pdf"),
+		filepath.Join("/out", "noext"),
+		filepath.Join("/out", "noext-2"),
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("destination %d = %q, want %q", i, got[i], want[i])
+		}
 	}
 }
 
