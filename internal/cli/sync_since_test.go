@@ -16,10 +16,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"fiken-cli/internal/store"
 )
 
 // contactRows builds dependent rows the contacts upsert path can key on.
@@ -288,15 +294,21 @@ func TestSyncDependentResource_WindowedPullKeepsRecordedResultCount(t *testing.T
 	}
 }
 
-// TestSyncResource_WatermarkSendsWindowedLastModifiedGe is the automatic path:
-// with no --since, a resource that has synced before sends the stored
-// last_synced_at as its window, day-floored and stepped back one, and --full
-// sends no window at all.
+// TestSyncResource_WatermarkArmFloorsThroughAFakeResolver exercises the
+// watermark plumbing in syncResource: with no --since, a resource that has
+// synced before would send the stored last_synced_at as its window, day-floored
+// and stepped back one, and --full would send no window at all.
 //
-// companies is the only flat-walked resource and declares no date filter, so
-// the mapping seams stand in for a filtered flat resource; the value rule and
-// the watermark plumbing under test are the generic ones.
-func TestSyncResource_WatermarkSendsWindowedLastModifiedGe(t *testing.T) {
+// It has to install FAKE resolvers on `companies` because NO SHIPPED RESOURCE
+// REACHES THAT ARM. syncResource is the only reader of last_synced_at and it
+// walks flat resources, of which companies is the only one, and companies
+// declares no date filter — so in production the watermark is always dropped by
+// the resource_not_incremental branch. The five resources that do declare
+// lastModifiedGe are all walked by syncDependentResource, which never reads the
+// watermark at all. What this test pins is the flooring rule and the --full
+// escape hatch on the one code path that can be made to run them, not a
+// behaviour a user can observe today: only an explicit --since windows a pull.
+func TestSyncResource_WatermarkArmFloorsThroughAFakeResolver(t *testing.T) {
 	prevParam, prevFormat := syncSinceParamResolver, syncSinceParamFormatResolver
 	syncSinceParamResolver = func(resource string) string {
 		if resource == "companies" {
@@ -353,5 +365,112 @@ func TestSyncResource_WatermarkSendsWindowedLastModifiedGe(t *testing.T) {
 		if got := q.Get("lastModifiedGe"); got != "" {
 			t.Fatalf("--full request %d sent lastModifiedGe=%q, want none", i, got)
 		}
+	}
+}
+
+// TestSyncDependentResource_DefaultRunIsAFullPull is the honesty test behind
+// the comments: contacts declares lastModifiedGe and has a stored watermark,
+// and a run without --since still asks for everything. The dependent walker
+// never reads sync_state.last_synced_at (and could not apply it per company if
+// it did — sync_state is keyed by resource_type alone), so "incremental by
+// default" is not a claim this CLI may make.
+func TestSyncDependentResource_DefaultRunIsAFullPull(t *testing.T) {
+	db := openTestStore(t)
+	seedCompanies(t, db, "testco")
+	if err := db.SaveSyncState("contacts", "", 2); err != nil {
+		t.Fatalf("SaveSyncState: %v", err)
+	}
+	if _, lastSynced, _, err := db.GetSyncState("contacts"); err != nil || lastSynced.IsZero() {
+		t.Fatalf("watermark not stored: (%v, %v)", lastSynced, err)
+	}
+
+	rs, c := newRowServer(t, contactRows(2), 100, 2)
+	var events bytes.Buffer
+	if res := syncDependentResource(context.Background(), c, db, contactsDep(), "", false, 0, false, nil, &events); res.Err != nil {
+		t.Fatalf("syncDependentResource: %v", res.Err)
+	}
+	params := rs.requestParams()
+	if len(params) == 0 {
+		t.Fatalf("no request reached the server")
+	}
+	for i, q := range params {
+		if dates := dateParamsOf(q); len(dates) != 0 {
+			t.Fatalf("request %d carried date params %v with no --since; the stored watermark must not window a dependent pull", i, dates)
+		}
+	}
+}
+
+// TestSync_FullWithSinceIsARejectedCombination is the data-loss guard found
+// reviewing issue #13. `sync --full --company S --resources R` clears every
+// existing row for that (company, resource) up front — clearFullSyncCompanyRows
+// is a real DELETE — and the walkers then refetch. Adding --since narrows that
+// refetch to one window, and because the dependent walker never consults
+// `full`, the rows outside the window were deleted and never fetched back. The
+// pair is now refused at flag validation, before a client or the mirror is
+// opened: exit code 2, no request, and the existing rows still in place.
+func TestSync_FullWithSinceIsARejectedCombination(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+
+	var requests int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&requests, 1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv("FIKEN_BASE_URL", srv.URL)
+	t.Setenv("FIKEN_API_TOKEN", "test-token")
+
+	dbPath := filepath.Join(home, "data.db")
+	db, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	if _, _, err := db.UpsertBatch("companies", []json.RawMessage{
+		json.RawMessage(`{"slug":"testco","name":"Test Company","testCompany":true}`),
+	}); err != nil {
+		t.Fatalf("seed companies: %v", err)
+	}
+	if _, _, err := db.UpsertBatch("sales", []json.RawMessage{
+		json.RawMessage(`{"saleId":4001,"parent_id":"testco","date":"2020-01-02"}`),
+		json.RawMessage(`{"saleId":4002,"parent_id":"testco","date":"2020-01-03"}`),
+	}); err != nil {
+		t.Fatalf("seed sales: %v", err)
+	}
+	_ = db.Close()
+
+	prevScope := syncCompanyScope
+	t.Cleanup(func() { syncCompanyScope = prevScope })
+
+	cmd := newSyncCmd(&rootFlags{timeout: 10 * time.Second, dataSource: "auto"})
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SilenceUsage = true
+	cmd.SilenceErrors = true
+	cmd.SetArgs([]string{"--db", dbPath, "--full", "--since", "7d", "--company", "testco", "--resources", "sales"})
+
+	err = cmd.Execute()
+	if err == nil {
+		t.Fatalf("--full --since was accepted; it deletes rows it then does not refetch")
+	}
+	if code := ExitCode(err); code != 2 {
+		t.Fatalf("exit code = %d, want 2 (usage error): %v", code, err)
+	}
+	if !strings.Contains(err.Error(), "--full and --since cannot be combined") {
+		t.Fatalf("error = %q, want the --full/--since usage message", err.Error())
+	}
+	if n := atomic.LoadInt64(&requests); n != 0 {
+		t.Fatalf("%d request(s) reached the API on a rejected invocation, want 0", n)
+	}
+
+	reopened, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	if got, err := reopened.CountCompanyResources("sales", "testco"); err != nil || got != 2 {
+		t.Fatalf("sales rows for testco = (%d, %v), want (2, nil): the rejected run must not clear anything", got, err)
 	}
 }

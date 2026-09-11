@@ -20,6 +20,17 @@
 //     result re-pulls at most two days of rows on every incremental run:
 //     missing a row is the failure that matters, re-upserting one is idempotent
 //     and free.
+//
+//     Read "incremental run" as "a run the caller gave --since". The stored
+//     last_synced_at watermark does NOT window a shipped pull: syncResource is
+//     the only reader of it and it walks `companies`, the sole flat resource,
+//     which declares no date filter; the dependent walker owns all five
+//     resources that do declare lastModifiedGe and never reads the watermark.
+//     A default `fiken-cli sync` is therefore still a full pull of every
+//     resource. sync_state is keyed by resource_type alone, so a per-(company,
+//     resource) watermark is a schema change and a separate issue, not this
+//     one.
+//
 //   - syncPullWindow is the walk's one answer to "was this pull a subset of the
 //     collection", kept as a value for the whole walk instead of a bare local
 //     flag, because two later decisions have to honour it: the recorded

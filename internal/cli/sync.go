@@ -102,6 +102,17 @@ Resource scoping:
   # Latest-only: refresh head of each resource, no historical backfill
   fiken-cli sync --latest-only`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// PATCH(sync-since-last-modified): --full and --since are opposites
+			// and combining them destroys rows. --full --company S --resources R
+			// clears every existing row for that (company, resource) up front
+			// (clearFullSyncCompanyRows, a real DELETE) and the walkers then
+			// refetch — but --since narrows that refetch to one window, so the
+			// rows outside the window are deleted and never fetched back. The
+			// pair is rejected here, before a client or the mirror is opened, so
+			// neither the clear nor a request can happen.
+			if full && since != "" {
+				return usageErr(fmt.Errorf("--full and --since cannot be combined: --full refetches every row, --since only a window"))
+			}
 			userParams, err := parseSyncUserParams(paramFlags, resourceParamFlags, globalParamFlags)
 			if err != nil {
 				return usageErr(err)
@@ -386,8 +397,11 @@ Resource scoping:
 	// agensia is a Fiken testCompany; the rest are live.
 	cmd.Flags().StringVar(&syncCompanyScope, "company", "", "Restrict parent-keyed (dependent) syncs to this company slug (default: every company in the mirror)")
 	cmd.Flags().StringSliceVar(&resources, "resources", nil, "Comma-separated resource types to sync. Naming a parent also runs its parent-keyed dependents (see Long help for scoping).")
-	cmd.Flags().BoolVar(&full, "full", false, "Full resync (ignore previous checkpoint)")
-	cmd.Flags().StringVar(&since, "since", "", "Incremental sync duration (e.g. 7d, 24h, 1w, 30m)")
+	// PATCH(sync-since-last-modified): the two are refused together in RunE —
+	// --full clears the scoped rows and --since would refetch only a window of
+	// them — so the help says so rather than letting a run find out.
+	cmd.Flags().BoolVar(&full, "full", false, "Full resync (ignore previous checkpoint). Cannot be combined with --since.")
+	cmd.Flags().StringVar(&since, "since", "", "Incremental sync duration (e.g. 7d, 24h, 1w, 30m). Cannot be combined with --full.")
 	cmd.Flags().IntVar(&concurrency, "concurrency", 1, "Number of parallel sync workers")
 	cmd.Flags().StringVar(&dbPath, "db", "", "Database path (default: ~/.local/share/fiken-cli/data.db)")
 	cmd.Flags().IntVar(&maxPages, "max-pages", 0, "Maximum pages to fetch per resource (0 = unlimited; cap-hit emits a sync_warning event)")
@@ -509,6 +523,16 @@ func syncResource(ctx context.Context, c interface {
 		// one, because lastModifiedGe is inclusive and lastModifiedDate is
 		// day-granular with no zone (issue #13). This is the one formatting
 		// site for both the --since flag and the watermark above.
+		//
+		// The watermark arm is INERT for every shipped resource, and saying so
+		// here beats implying otherwise: syncResource walks flat resources, and
+		// `companies` is the only one, so sinceParam is always "" here and the
+		// watermark is dropped by the resource_not_incremental branch above.
+		// The dependent walker, which handles every resource that DOES declare
+		// lastModifiedGe, never reads last_synced_at at all. In production only
+		// an explicit --since ever windows a pull; the default run is a full
+		// pull of every resource. A per-(company, resource) watermark is a
+		// separate change and is not in issue #13.
 		effectiveSince = syncSinceWindowValue(effectiveSince, syncSinceParamFormatFor(resource))
 	}
 
@@ -913,8 +937,10 @@ func resourceSupportsPagination(resource string) bool {
 func syncResourceSinceParam(resource string) string {
 	switch resource {
 	// PATCH(sync-since-last-modified): the printed switch was empty, so every
-	// --since and every stored watermark was discarded and every sync was a
-	// full re-pull of every page of every resource (issue #13). spec.yaml
+	// --since was discarded and every sync was a full re-pull of every page of
+	// every resource (issue #13). Only an explicit --since reaches here: the
+	// stored watermark is never applied to a resource in this list, because the
+	// dependent walker that owns all five does not read it. spec.yaml
 	// declares the lastModifiedGe parameter on exactly these five synced list
 	// operations: getContacts (:718), getJournalEntries (:1131),
 	// getTransactions (:1274), getProducts (:2770) and getSales (:2914).
@@ -1793,6 +1819,15 @@ func syncDependentResource(ctx context.Context, c interface {
 	var firstDenial *accessWarning
 	pageSize := determinePaginationDefaults()
 	depSinceParam := syncSinceParamFor(dep.Name) // PATCH(pagination-headers)
+	// PATCH(sync-since-last-modified): sinceTS is the EXPLICIT --since and
+	// nothing else. This walker never reads sync_state.last_synced_at, so a
+	// default dependent run is a full pull of every page for every parent even
+	// for the five resources that declare lastModifiedGe; sync_state is keyed
+	// by resource_type alone, so a mirror-wide watermark could not be applied
+	// per (company, resource) anyway. `full` is therefore not consulted here:
+	// with no watermark to ignore there is nothing for it to switch off, and
+	// --full with --since is refused at flag validation because the combination
+	// clears rows it would then not refetch.
 	depSinceTS := sinceTS
 	if depSinceTS != "" && depSinceParam == "" {
 		if humanFriendly {
