@@ -12,6 +12,7 @@ This file is maintained by printing-press-library release automation. Do not han
 ### Added
 
 - The client captures Fiken's `Fiken-Api-Page`, `-Page-Size`, `-Page-Count` and `-Result-Count` headers. Paginated reads publish `result_count` and `page_count` in the provenance `meta`; `sync` compares the distinct rows landed per company and resource against the header and emits `{"event":"sync_anomaly","reason":"result_count_mismatch"}` on a short pull; an unscoped, unwindowed full sync records the count in `sync_state.result_count`, shown by `doctor` next to the row count (#15).
+- `sync --since` and the `last_synced_at` watermark now send `lastModifiedGe` for contacts, journal_entries, transactions, products and sales, with the start day moved back one; the other resources have no date filter and stay full pulls, each saying so once with `resource_not_incremental` (#13).
 
 ## 2.0.0 - 2026-09-10
 

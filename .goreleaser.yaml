@@ -33,7 +33,7 @@ archives:
     files:
       - README.md
       - LICENSE
-      - SKILL.md
+      - skills/**
 
 checksum:
   name_template: checksums.txt
