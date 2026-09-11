@@ -4,10 +4,13 @@
 //
 // Pins the mode source for the test-company write guard: the dotenv parser and
 // the precedence rules in resolveWriteGuardMode. Live mode must be reachable
-// only through an untracked env file, and never when --agent is set.
+// only through FIKEN_MODE in the process environment or an untracked env file;
+// flags such as --agent neither grant nor block it.
 package cli
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -48,15 +51,35 @@ func TestParseModeFromEnvFile(t *testing.T) {
 	}
 }
 
-// TestResolveWriteGuardMode_AgentForcesTest is the rule that keeps an agent in
-// test mode no matter what the environment says.
-func TestResolveWriteGuardMode_AgentForcesTest(t *testing.T) {
-	t.Setenv("FIKEN_MODE", "live")
-	if got := resolveWriteGuardMode(true); got != client.ModeTest {
-		t.Fatalf("--agent mode = %v, want test", got)
+// TestResolveWriteGuardMode_EnvFileWinsRegardlessOfAgent is the rule from
+// issue #20: the mode comes from the env file (here .env.local in the working
+// directory) and nothing about the invocation — --agent included, which is
+// why the resolver takes no flag — can pull it back to test. The process env
+// is scrubbed so the file is the only source consulted.
+func TestResolveWriteGuardMode_EnvFileWinsRegardlessOfAgent(t *testing.T) {
+	dir := t.TempDir()
+	body := "# untracked, per-workspace\nFIKEN_MODE" + "=" + "live\n"
+	if err := os.WriteFile(filepath.Join(dir, ".env.local"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if got := resolveWriteGuardMode(false); got != client.ModeLive {
-		t.Fatalf("non-agent mode with the env set = %v, want live", got)
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(cwd) })
+
+	// t.Setenv first so the original values come back after the test; then
+	// unset, because LookupEnv would still see an empty-but-present variable.
+	t.Setenv("FIKEN_MODE", "")
+	_ = os.Unsetenv("FIKEN_MODE")
+	t.Setenv("PRINTING_PRESS_VERIFY", "")
+	_ = os.Unsetenv("PRINTING_PRESS_VERIFY")
+
+	if got := resolveWriteGuardMode(); got != client.ModeLive {
+		t.Fatalf("mode with the live value in .env.local = %v, want live", got)
 	}
 }
 
@@ -65,7 +88,7 @@ func TestResolveWriteGuardMode_AgentForcesTest(t *testing.T) {
 func TestResolveWriteGuardMode_VerifyForcesTest(t *testing.T) {
 	t.Setenv("PRINTING_PRESS_VERIFY", "1")
 	t.Setenv("FIKEN_MODE", "live")
-	if got := resolveWriteGuardMode(false); got != client.ModeTest {
+	if got := resolveWriteGuardMode(); got != client.ModeTest {
 		t.Fatalf("verify-env mode = %v, want test", got)
 	}
 }
@@ -75,7 +98,7 @@ func TestResolveWriteGuardMode_VerifyForcesTest(t *testing.T) {
 func TestResolveWriteGuardMode_DefaultIsTest(t *testing.T) {
 	t.Setenv("PRINTING_PRESS_VERIFY", "")
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	if got := resolveWriteGuardMode(false); got != client.ModeTest {
+	if got := resolveWriteGuardMode(); got != client.ModeTest {
 		t.Fatalf("default mode = %v, want test", got)
 	}
 }

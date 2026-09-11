@@ -146,7 +146,7 @@ Shared flags: `--min-impact-ore` drops findings below an absolute øre threshold
 
 Every mutating request is refused unless the synced company record has `testCompany: true`. A refusal exits **8** with a JSON error naming the company slug and a reason code: `not_test_company`, `company_unknown` (the slug is absent from the local mirror — build it first), or `guard_unconfigured` (the fail-closed default). Nothing goes on the wire.
 
-Writing to real books requires live mode, which is reached only by `FIKEN_MODE` set to `live` in an untracked env file (`.env.local` or `.env` in the working directory, or `~/.config/fiken-cli/env`) or in the process environment. **There is deliberately no CLI flag**, and `--agent` forces test mode regardless — an agent cannot put itself into live mode.
+Writing to real books requires live mode, which is reached only by `FIKEN_MODE` set to `live` in an untracked env file (`.env.local` or `.env` in the working directory, or `~/.config/fiken-cli/env`) or in the process environment. **There is deliberately no CLI flag**: `--agent` never changes the write mode — only `FIKEN_MODE` in the process environment or an untracked env file does — and the MCP server is always in test mode.
 
 ### BI & VAT analytics
 - **`mva-summary`** — Reconstructs a VAT-return-shaped view from local lines: net basis and output/input VAT bucketed by (`vatType`, `mva_code`), for any period.

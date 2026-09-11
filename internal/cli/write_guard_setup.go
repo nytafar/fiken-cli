@@ -4,9 +4,10 @@
 //
 // Wiring for the test-company write guard (internal/client/write_guard.go,
 // PLAN 2.4.1). This file owns the three things internal/client deliberately
-// cannot own: the write mode (read from an untracked env file, never a flag),
-// the slug -> testCompany resolver (reads the SQLite mirror), and the audit
-// sink that appends a refusal to the append-only agent_events table.
+// cannot own: the write mode (read from the process environment or an
+// untracked env file, never from a flag — --agent neither forces nor forbids
+// live mode), the slug -> testCompany resolver (reads the SQLite mirror), and
+// the audit sink that appends a refusal to the append-only agent_events table.
 package cli
 
 import (
@@ -33,8 +34,7 @@ const writeGuardExitCode = 8
 // configureWriteGuard installs mode, resolver and audit sink for the CLI.
 // Idempotent and cheap: the resolver loads the mirror lazily, at most once.
 func configureWriteGuard(flags *rootFlags) {
-	agent := flags != nil && flags.agent
-	client.ConfigureWriteGuard(resolveWriteGuardMode(agent), writeGuardResolver)
+	client.ConfigureWriteGuard(resolveWriteGuardMode(), writeGuardResolver)
 	client.SetWriteGuardOnDeny(auditWriteGuardDenial)
 }
 
@@ -61,15 +61,18 @@ func writeGuardEnvFiles() []string {
 
 // resolveWriteGuardMode decides the process write mode.
 //
-//	--agent                    -> test, unconditionally
 //	PRINTING_PRESS_VERIFY set  -> test, unconditionally
 //	FIKEN_MODE in the process env -> that value
 //	first env file that defines FIKEN_MODE -> that value
 //	otherwise                  -> test
-func resolveWriteGuardMode(agent bool) client.Mode {
-	if agent {
-		return client.ModeTest
-	}
+//
+// Flags play no part: --agent is agent ergonomics (JSON envelope, compact
+// output), not a safety boundary. An agent that should never write to real
+// books is kept in test mode by the same mechanism as any other caller — a
+// FIKEN_MODE=test line in the working directory's .env.local, plus whatever
+// hook the workspace puts in front of the binary. The MCP server is the one
+// exception and stays in test mode unconditionally (ConfigureWriteGuardForMCP).
+func resolveWriteGuardMode() client.Mode {
 	if os.Getenv("PRINTING_PRESS_VERIFY") != "" {
 		return client.ModeTest
 	}

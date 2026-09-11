@@ -161,7 +161,7 @@ Default auth is a personal API token (Settings -> API -> Personlige API-nokler i
 
 Every mutating request is refused unless the mirrored company record has `testCompany: true`. A refusal exits **8** with a JSON error naming the company slug and a reason code — `not_test_company`, `company_unknown` (the slug is not in the local mirror yet), or `guard_unconfigured` (the fail-closed default when a code path never wired the guard). Nothing is sent to Fiken.
 
-Writing to real books requires live mode, reached only by `FIKEN_MODE` set to `live` in an untracked env file (`.env.local` or `.env` in the working directory, or `~/.config/fiken-cli/env`) or in the process environment. **There is deliberately no CLI flag**, and `--agent` forces test mode regardless, so an agent cannot put itself into live mode. Every refusal is appended to the audit log.
+Writing to real books requires live mode, reached only by `FIKEN_MODE` set to `live` in an untracked env file (`.env.local` or `.env` in the working directory, or `~/.config/fiken-cli/env`) or in the process environment. **There is deliberately no CLI flag**: `--agent` never changes the write mode — only `FIKEN_MODE` in the process environment or an untracked env file does — and the MCP server is always in test mode. Every refusal is appended to the audit log.
 
 ## Quick Start
 
