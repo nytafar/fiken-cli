@@ -1,0 +1,38 @@
+{
+  "schema_version": 2,
+  "id": "sync-invoices-creditnotes",
+  "applied_at": "2026-09-11",
+  "base_run_id": "20260609-145046",
+  "base_printing_press_version": "4.24.0",
+  "summary": "feat(sync): mirror invoices and creditNotes as dependent resources (issue #18)",
+  "reason": "sync covered 11 of the API's ~30 list collections: companies plus the ten dependents the printer emitted. Passing any other name to --resources failed with `unknown sync resource`, and the two the bookkeeping mirror was actually missing were invoices and creditNotes. An invoice is NOT derivable from the sale blob: issueDate, dueDate, invoiceNumber, the settlement state and dispatches[] live only on invoiceResult, and credit history lives only on creditNoteResult. The printer left them out because it emitted one list operation per tag from its own profile, not because the endpoints differ in shape — /companies/{companySlug}/invoices (spec.yaml:1362) and /companies/{companySlug}/creditNotes (:1795) are both per-company bare JSON arrays, both take the shared page/pageSize parameters, both return Fiken-Api-Page, -Page-Size, -Page-Count and -Result-Count, and both declare the shared components.parameters.lastModifiedGe (getInvoices :1381, getCreditNotes :1815). So this is a DATA-TABLE change with no new code path, which is also why it has to be recorded in five places at once or it half-works: dependentResourceDefs (the walker entry), resourceIDFieldOverrides in BOTH printed copies (internal/cli/sync.go for the walker's own extractID and internal/store/store.go for UpsertBatch — invoiceId and creditNoteId are in no generic fallback list, so a missing entry is not a wrong key but zero rows stored and an all_items_failed_id_extraction anomaly), resourceParentKeyColumns (without it the rows land under a BARE id and two companies' invoices collide on the resources primary key, which is issue #6's data loss repeated), resourceSupportsPagination (without it the walk stops after page 0 and silently mirrors the first 100 rows), and syncResourceSinceParam / syncResourceSinceParamFormat (issue #13's mapping; without it --since degrades to a full pull with a resource_not_incremental warning). store.CanonicalResource already knew both names as generic resources, because the printed read and mutation commands address them by their kebab spelling (credit-notes -> credit_notes), so no change was needed there and the read path and the sync path now key the same rows the same way. The since arms are a SEPARATE case arm from the five-name arm rather than an extension of it, deliberately: the sync-since-last-modified record greps for the exact five-name case line, and widening that line would have broken its needle and stopped the regen fail-closed check for issue #13. For the same class of reason the two resourceParentKeyColumns entries sit inline with no comment between them — an in-block comment splits gofmt's alignment group and rewrites every surrounding row, which would have broken the mirror-canonical-resource-name record's \"bank_accounts\": \"parent_id\" and \"journal_entries\": \"parent_id\" needles; the why for those two rows is on the map's doc comment instead. NO TYPED TABLE is added: neither name is in the DDL, both take the generic `resources` path through the loud default arm, and doctor's mirror invariants handle that already (CountTypedTable reports ok=false and the cross-check skips the typed count while the sync_state / resources comparison and the bare-key scan still run). DELIBERATELY OUT: invoices/drafts and creditNotes/drafts, the counters, offers, orderConfirmations, sales/purchases drafts, accountBalances and bankBalances (as-of snapshots with no stable id — the key would need a date in it), timeEntries/timeUsers/activities, groups (array of bare strings, no identity) and every .../{id}/attachments and .../{id}/payments sub-collection (already inline in the parent blobs, and the attachment object has no id in the spec, so a standalone row is dropped at store.go's extract step anyway). Those wait for a use case. OPERATIONAL NOTE: an unscoped `fiken-cli sync` now walks 13 collections per company rather than 11, so the first run after this lands re-pulls two full collections for every company in the mirror.",
+  "files": [
+    "internal/cli/sync.go",
+    "internal/store/store.go",
+    "internal/cli/sync_invoices_creditnotes_test.go",
+    "internal/store/sync_invoices_creditnotes_test.go",
+    "internal/cli/mirror_id_keys_test.go"
+  ],
+  "call_sites": [
+    "PATCH(sync-invoices-creditnotes)",
+    "{Name: \"invoices\", ParentTable: \"companies\", ParentIDParam: \"companySlug\", PathTemplate: \"/companies/{companySlug}/invoices\"",
+    "{Name: \"credit_notes\", ParentTable: \"companies\", ParentIDParam: \"companySlug\", PathTemplate: \"/companies/{companySlug}/creditNotes\"",
+    "\"credit_notes\": \"creditNoteId\",",
+    "\"invoices\":     \"invoiceId\",",
+    "\"credit_notes\":                \"parent_id\",",
+    "\"invoices\":                    \"parent_id\",",
+    "case \"invoices\", \"credit_notes\":\n\t\treturn \"lastModifiedGe\"",
+    "case \"invoices\", \"credit_notes\":\n\t\treturn \"date\"",
+    "case \"credit_notes\":\n\t\treturn true",
+    "case \"invoices\":\n\t\treturn true",
+    "func TestSync_InvoicesAndCreditNotesLandKeyedRows(t *testing.T) {",
+    "func TestSync_InvoicesAndCreditNotesSendLastModifiedGe(t *testing.T) {",
+    "func TestDependentResourceDefs_InvoicesAndCreditNotes(t *testing.T) {",
+    "func TestSyncSinceParam_InvoicesAndCreditNotes(t *testing.T) {",
+    "func TestExtractResourceID_InvoicesAndCreditNotes(t *testing.T) {",
+    "func TestStorageKeyOf_InvoicesAndCreditNotesCarryTheCompany(t *testing.T) {",
+    "func TestCanonicalResource_InvoicesAndCreditNotesKebab(t *testing.T) {"
+  ],
+  "validated_outcome": "make check green (go vet ./..., go test ./..., scripts/check-boundaries.sh) plus go test -race ./internal/store/... ./internal/cli/.... Hand-authored tests: internal/cli/sync_invoices_creditnotes_test.go drives the REAL sync command against a fake Fiken that serves a different bare array per collection path — TestSync_InvoicesAndCreditNotesLandKeyedRows asserts `--resources invoices,credit_notes` for one company reports sync_summary resources 2 / success 2 / errored 0 and lands the rows under the id\\0<slug> keys 4001\\0testco, 4002\\0testco and 9001\\0testco with parent_id stamped; TestSync_InvoicesAndCreditNotesSendLastModifiedGe asserts --since 7d puts lastModifiedGe=(now-7d floored, minus one) on every request to both paths, with no other date parameter and no resource_not_incremental warning; TestDependentResourceDefs_InvoicesAndCreditNotes pins the two table entries, their paths, pagination and that knownSyncResourceNames accepts both; TestSyncSinceParam_InvoicesAndCreditNotes pins the since mapping. internal/store/sync_invoices_creditnotes_test.go pins the store half: ExtractResourceID on both, StorageKeyOf carrying the company (the same invoiceId in two books is two keys) and the kebab spelling the generated read commands use resolving to the snake one. internal/cli/mirror_id_keys_test.go's TestSyncIDFieldOverrides_MatchStoreForFixedResources was extended with the two new names so the two printed copies of the override map cannot drift. Every new test was checked RED against the pre-change tree: the two command-level tests failed with `unknown sync resource \"invoices\"` / `\"credit_notes\"`. No live API call was made and no fiken write command was run.",
+  "patch_count": 2
+}

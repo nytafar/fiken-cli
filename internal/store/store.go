@@ -2486,6 +2486,13 @@ var resourceIDFieldOverrides = map[string]string{
 	"bank_accounts": "bankAccountId",
 	"companies":     "slug",
 	"contacts":      "contactId",
+	// PATCH(sync-invoices-creditnotes): invoiceResult requires invoiceId
+	// (spec.yaml:5244) and creditNoteResult requires creditNoteId
+	// (spec.yaml:4930); neither name is in genericIDFieldFallbacks, so without
+	// these two entries every row of the new resources is an extract failure
+	// (issue #18).
+	"credit_notes": "creditNoteId",
+	"invoices":     "invoiceId",
 	// PATCH(mirror-id-keys-accounts-inbox): key on documentId, the path id of
 	// getInboxDocument, not the display name (issue #16).
 	"inbox":           "documentId",
@@ -2509,13 +2516,23 @@ var genericIDFieldFallbacks = []string{"id", "ID", "gid", "sid", "uid", "uuid", 
 // local mirror rows need the parent context in the storage key. Without this,
 // many-to-many sub-collections collapse every parent association onto the
 // child's bare id and silently keep only the last synced parent.
+//
+// PATCH(sync-invoices-creditnotes): credit_notes and invoices are per-company
+// collections like every other dependent, so their rows need the company in
+// the storage key — two companies' invoices share invoiceId ranges and would
+// otherwise collide on the resources primary key (issue #18; see #6 for what
+// that collision cost). The entries sit inline in the map rather than behind
+// their own comment because an in-block comment splits gofmt's alignment group
+// and rewrites every surrounding row.
 var resourceParentKeyColumns = map[string]string{
 	"accounts":                    "parent_id",
 	"bank_accounts":               "parent_id",
 	"contacts":                    "parent_id",
 	"contacts_attachments":        "contacts_id",
 	"contact_person":              "contacts_id",
+	"credit_notes":                "parent_id",
 	"inbox":                       "parent_id",
+	"invoices":                    "parent_id",
 	"invoices_attachments":        "invoices_id",
 	"journal_entries":             "parent_id",
 	"journal_entries_attachments": "journal_entries_id",

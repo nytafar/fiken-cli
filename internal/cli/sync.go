@@ -912,7 +912,14 @@ func resourceSupportsPagination(resource string) bool {
 		return true
 	case "contacts":
 		return true
+	// PATCH(sync-invoices-creditnotes): both list operations declare the shared
+	// page/pageSize parameters and return the Fiken-Api-Page-Count and
+	// Fiken-Api-Result-Count headers (spec.yaml:1362, :1795) — issue #18.
+	case "credit_notes":
+		return true
 	case "inbox":
+		return true
+	case "invoices":
 		return true
 	case "journal_entries":
 		return true
@@ -941,13 +948,20 @@ func syncResourceSinceParam(resource string) string {
 	// every resource (issue #13). Only an explicit --since reaches here: the
 	// stored watermark is never applied to a resource in this list, because the
 	// dependent walker that owns all five does not read it. spec.yaml
-	// declares the lastModifiedGe parameter on exactly these five synced list
+	// declares the lastModifiedGe parameter on these five synced list
 	// operations: getContacts (:718), getJournalEntries (:1131),
 	// getTransactions (:1274), getProducts (:2770) and getSales (:2914).
 	// purchases declares no filter and carries no lastModifiedDate; accounts,
 	// bank_accounts, companies, inbox and projects declare no date filter at
 	// all, so they keep the resource_not_incremental warning and a full pull.
 	case "contacts", "journal_entries", "transactions", "products", "sales":
+		return "lastModifiedGe"
+	// PATCH(sync-invoices-creditnotes): getInvoices (spec.yaml:1381) and
+	// getCreditNotes (spec.yaml:1815) declare the same shared lastModifiedGe
+	// parameter; they were outside the list above only because neither was a
+	// sync resource before issue #18. Kept as its own arm so the five-name
+	// needle the sync-since-last-modified record greps for still resolves.
+	case "invoices", "credit_notes":
 		return "lastModifiedGe"
 	}
 	return ""
@@ -959,6 +973,10 @@ func syncResourceSinceParamFormat(resource string) string {
 	// `type: string, format: date` — YYYY-MM-DD — which is the spelling
 	// formatSyncSinceValue's day arm matches on.
 	case "contacts", "journal_entries", "transactions", "products", "sales":
+		return "date"
+	// PATCH(sync-invoices-creditnotes): same shared components.parameters
+	// .lastModifiedGe, so the same `type: string, format: date` (issue #18).
+	case "invoices", "credit_notes":
 		return "date"
 	}
 	return ""
@@ -1719,7 +1737,21 @@ func dependentResourceDefs() []dependentResourceDef {
 		{Name: "contacts", ParentTable: "companies", ParentIDParam: "companySlug", PathTemplate: "/companies/{companySlug}/contacts", KeyField: "slug", PathParams: []dependentPathParamDef{
 			{Param: "companySlug", Field: "slug"},
 		}},
+		// PATCH(sync-invoices-creditnotes): getCreditNotes (spec.yaml:1795) is a
+		// paged bare array with the Fiken-Api-* headers, exactly like the ten
+		// dependents the printer emitted; it was left out only because the
+		// profiler picked one list operation per tag (issue #18).
+		{Name: "credit_notes", ParentTable: "companies", ParentIDParam: "companySlug", PathTemplate: "/companies/{companySlug}/creditNotes", KeyField: "slug", PathParams: []dependentPathParamDef{
+			{Param: "companySlug", Field: "slug"},
+		}},
 		{Name: "inbox", ParentTable: "companies", ParentIDParam: "companySlug", PathTemplate: "/companies/{companySlug}/inbox", KeyField: "slug", PathParams: []dependentPathParamDef{
+			{Param: "companySlug", Field: "slug"},
+		}},
+		// PATCH(sync-invoices-creditnotes): getInvoices (spec.yaml:1362) carries
+		// issueDate, dueDate, invoiceNumber and dispatches[], none of which the
+		// sale blob holds, so a bookkeeping mirror without it cannot answer a
+		// settlement or dispatch question at all (issue #18).
+		{Name: "invoices", ParentTable: "companies", ParentIDParam: "companySlug", PathTemplate: "/companies/{companySlug}/invoices", KeyField: "slug", PathParams: []dependentPathParamDef{
 			{Param: "companySlug", Field: "slug"},
 		}},
 		{Name: "journal_entries", ParentTable: "companies", ParentIDParam: "companySlug", PathTemplate: "/companies/{companySlug}/journalEntries", KeyField: "slug", PathParams: []dependentPathParamDef{
@@ -2211,6 +2243,13 @@ var resourceIDFieldOverrides = map[string]string{
 	"bank_accounts": "bankAccountId",
 	"companies":     "slug",
 	"contacts":      "contactId",
+	// PATCH(sync-invoices-creditnotes): invoiceResult requires invoiceId
+	// (spec.yaml:5244) and creditNoteResult requires creditNoteId
+	// (spec.yaml:4930); neither name is in genericIDFieldFallbacks, so without
+	// these two entries every row of the new resources is an extract failure
+	// (issue #18).
+	"credit_notes": "creditNoteId",
+	"invoices":     "invoiceId",
 	// PATCH(mirror-id-keys-accounts-inbox): key on documentId, the path id of
 	// getInboxDocument, not the display name (issue #16).
 	"inbox":           "documentId",
