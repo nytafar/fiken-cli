@@ -6,8 +6,10 @@
 //   superforing.mjs list      --slug nyta --account 170218093 --fra 2026-05-01 --til 2026-06-30
 //   superforing.mjs buttons   <linjeId>... [same filters]
 //   superforing.mjs show      <linjeId>... [--chars 600]   buttons plus the suggestion text of the open row
-//   superforing.mjs confirm   <linjeId>... [--label "OK, gå til neste"] [--log] [--correlation-id X]
+//   superforing.mjs confirm   <linjeId>... [--label "OK, gå til neste"] [--pick <candidateId>] [--log] [--correlation-id X]
+//                             --pick selects the radio candidate first and clicks "Gå til neste" (duplicate-amount rows)
 //   superforing.mjs open      [filters]            navigate only
+//   superforing.mjs eval      '<js body>'         run page JS with the primitives in scope; `return` a value
 //
 // Filters: --fra --til --sok --kun-innbetalinger true|false --side N. --port (default 9222).
 // Output is TSV on stdout, one row per line. Exit codes: 0 ok, 2 usage, 3 signed out,
@@ -25,7 +27,7 @@ for (let i = 0; i < argv.length; i++) {
 }
 const need = (k, d) => opts[k] ?? d ?? die(2, `missing --${k}`);
 function die(code, msg) { console.error(msg); process.exit(code); }
-if (!['list', 'buttons', 'show', 'confirm', 'open'].includes(cmd)) die(2, 'usage: superforing.mjs list|buttons|show|confirm|open [ids...] [--slug --account --fra --til ...]');
+if (!['list', 'buttons', 'show', 'confirm', 'open', 'eval'].includes(cmd)) die(2, 'usage: superforing.mjs list|buttons|show|confirm|open [ids...] [--slug --account --fra --til ...]');
 
 const port = opts.port ?? '9222';
 const slug = need('slug', 'nyta');
@@ -74,8 +76,14 @@ async function expand(id) {
   await sleep(500); return true;
 }
 async function buttons(id) { if (!(await expand(id))) return null; return [...byId(id).closest('details').querySelectorAll('button')].map(b => norm(b.textContent)).filter(Boolean); }
-async function confirm(id, label) {
+async function confirm(id, label, pick) {
   if (!(await expand(id))) return { id, ok: false, why: 'missing' };
+  if (pick) {
+    const d = byId(id).closest('details');
+    const r = d.querySelector('input[type=radio][value="' + pick + '"]');
+    if (!r) return { id, ok: false, why: 'no-candidate', present: [...d.querySelectorAll('input[type=radio]')].map(x => x.value) };
+    r.click(); r.dispatchEvent(new Event('change', { bubbles: true })); await sleep(600);
+  }
   const btn = [...byId(id).closest('details').querySelectorAll('button')].find(b => norm(b.textContent) === label);
   if (!btn) return { id, ok: false, why: 'no-button', present: await buttons(id) };
   btn.click();
@@ -100,8 +108,9 @@ const t = await target();
 const cdp = await Cdp.connect(t.webSocketDebuggerUrl);
 await cdp.send('Page.enable');
 await cdp.send('Page.bringToFront');
+const strip = u => u.replace(/[&?]linje=\d+/, '').replace(/[&?]continue\b/, '');
 const current = await cdp.eval('location.href');
-if (current !== url) {
+if (strip(current) !== strip(url)) {
   await cdp.send('Page.navigate', { url });
   await sleep(800);
 }
@@ -130,14 +139,19 @@ if (cmd === 'open') {
     const r = await cdp.eval(wrap(`const b = await buttons(${Number(id)}); if (!b) return null; const d = byId(${Number(id)}).closest('details'); return { b, text: norm(d.innerText).slice(0, ${chars}) };`));
     console.log(`== ${id}\t${r ? r.b.join(' / ') : '<missing>'}\n${r ? r.text : ''}`);
   }
+} else if (cmd === 'eval') {
+  if (!pos.length) die(2, 'eval needs a JS body');
+  const v = await cdp.eval(wrap(pos.join(' ')));
+  console.log(typeof v === 'string' ? v : JSON.stringify(v, null, 1));
 } else if (cmd === 'confirm') {
   if (!pos.length) die(2, 'confirm needs at least one linje id');
-  const label = opts.label ?? 'OK, gå til neste';
+  const label = opts.label ?? (opts.pick ? 'Gå til neste' : 'OK, gå til neste');
   for (const id of pos) {
-    const r = await cdp.eval(wrap(`return await confirm(${Number(id)}, ${JSON.stringify(label)});`));
+    const r = await cdp.eval(wrap(`return await confirm(${Number(id)}, ${JSON.stringify(label)}, ${JSON.stringify(opts.pick ?? null)});`));
     let logged = '';
     if (r.ok && opts.log) {
       const args = ['log-event', '--company', slug, '--operation', 'match.confirmed', '--surface', 'browser', '--source-ref', `linje:${id}`, '--agent'];
+      if (opts.pick) args.push('--inputs', JSON.stringify({ candidate: opts.pick, button: label }));
       if (opts['correlation-id']) args.push('--correlation-id', opts['correlation-id']);
       const p = spawnSync('fiken-cli', args, { encoding: 'utf8' });
       logged = p.status === 0 ? 'logged' : `log-failed:${(p.stderr || p.stdout).trim().slice(0, 120)}`;

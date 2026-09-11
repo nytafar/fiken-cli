@@ -56,7 +56,7 @@ before reading buttons; reading earlier yields a false "no suggestion".
 | `Registrer nytt kjøp` / `Registrer nytt salg` | only an inbox document matched, no paid voucher | fix books, reload, re-read |
 | `Forslaget stemmer ikke, jeg vil endre` | reject suggestion | never |
 | `Fri postering`, `Alternativer` | no suggestion | park |
-| `Gå til neste` only, text `Samme beløp finnes flere steder` | two lines share one amount and one voucher; the extra line is a double payment | park both, report |
+| `Gå til neste` only, text `Samme beløp finnes flere steder`, radio inputs `Er dette riktig forslag?` | several lines share one amount; each radio `value` is a candidate voucher's transaction id | pick the radio, then `Gå til neste` confirms; with one candidate left there is no radio and `Gå til neste` alone confirms; see [`../flows/dobbeltbetaling.md`](../flows/dobbeltbetaling.md) |
 
 Confirming removes the line from the list (under `nf`), shrinks the count by one, and opens
 the next line. The API shows no change on the purchase or its journal entries; the

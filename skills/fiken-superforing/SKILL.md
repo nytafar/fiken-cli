@@ -40,6 +40,7 @@ Every booking starts from a live bank line and ends with that line confirmed in 
 3. Pick the flow for each line and follow it to the end:
    - Utbetaling with a supplier receipt: [`flows/utbetaling-kjop.md`](flows/utbetaling-kjop.md)
    - Innbetaling, Vipps- and Stripe-oppgjør, customer invoice payments: [`flows/innbetaling.md`](flows/innbetaling.md)
+   - Two lines, one amount, radio candidates (double payment): [`flows/dobbeltbetaling.md`](flows/dobbeltbetaling.md)
    - `Antatt` row whose `Leverandør` differs from the bank title: [`flows/leverandor-navnebytte.md`](flows/leverandor-navnebytte.md)
 4. Done when every line in the period is either confirmed or parked with a reason, and the
    parked list is in the final report with `linje.id`, date, amount and reason.

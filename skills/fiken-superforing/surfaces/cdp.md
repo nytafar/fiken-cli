@@ -15,11 +15,14 @@ node $S list    --fra 2026-05-01 --til 2026-06-30            # TSV: id dato linj
 node $S buttons 12094587982 12094587983 --fra … --til …      # one line per id: "id<TAB>btn / btn / btn"
 node $S show    13740949433 --fra … --til … --chars 420      # buttons plus the suggestion text; run on every row before deciding
 node $S confirm 13672073478 --label "Bekreft dato" --fra … --til … --log   # Vipps-oppgjør
+node $S confirm 12094587983 --pick 11964173461 --fra … --til … --log        # duplicate-amount row: choose the candidate
+node $S eval 'await expand(12094587983); return [...byId(12094587983).closest("details").querySelectorAll("input[type=radio]")].map(r => r.value).join(",")'
 node $S confirm 12046895329 12046895333 --fra … --til … --log --correlation-id <run>
 ```
 
 - `--slug` and `--account` default to `nyta` and `170218093`; `--sok`, `--kun-innbetalinger`,
   `--side` map to the URL filters in [`../reference/superforing-dom.md`](../reference/superforing-dom.md).
+- `eval '<js>'` runs page JS with the primitives in scope, for states the commands do not cover.
 - `list` prints every open row on the page in one go: no truncation, no paging.
 - `confirm` clicks `OK, gå til neste` (or `--label`) per id and prints `OK` or `NO` with the
   buttons present. With `--log` it also writes `match.confirmed` through `fiken-cli log-event`.
