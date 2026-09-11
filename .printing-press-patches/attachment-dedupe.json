@@ -1,0 +1,34 @@
+{
+  "schema_version": 2,
+  "id": "attachment-dedupe",
+  "applied_at": "2026-09-11",
+  "base_run_id": "20260609-145046",
+  "base_printing_press_version": "4.24.0",
+  "summary": "fix(sync): collapse the API's duplicate attachment entries before the upsert (issue #10)",
+  "reason": "The Fiken API serves the same attachment twice inside the parent document: 78 of 85 synced sales on the test company carry a saleAttachments array holding two BYTE-IDENTICAL entries (same uuid, identifier, downloadUrl, filename, type). The mirror was ruled out as the cause — upsertGenericResourceTx replaces the data blob wholesale on conflict and a fresh re-sync left the array lengths unchanged — so the duplication is in the payload. Journal entries showed none on that company, but purchaseAttachments and the journal entry `attachments` array are the same shape from the same API and are cleaned too rather than waiting for the second report of the same bug. Nothing breaks today because the only reader, missing-bilag, tests for a non-empty array; anything that COUNTS or LISTS attachments shows every document twice. PLACEMENT: the clean-up is in upsertResourceBatch, before the upsert, not at the read sites, because the two consumers that matter — the detectors and the MCP sql tool — both read the STORED blob rather than the response, so a read-side fix would have to be repeated in every future report and would be forgotten once. One line of generated code plus its PATCH comment; the helper and its tests are hand-authored in internal/cli/attachment_dedupe.go. KEY ORDER is uuid, then identifier, then downloadUrl, namespaced by the field the value came from so an identifier that happens to equal another entry's uuid cannot collapse two documents. uuid is what the live payload identifies an attachment by but it is UNDOCUMENTED — spec.yaml's attachment schema (~4556) carries only identifier, downloadUrl, comment and type — so the chain has to survive its absence. An entry carrying NONE of the three is kept as is, every time: with no identity there is no evidence two such entries are the same document, and dropping one would be real data loss to fix a cosmetic count. Order is preserved and the first occurrence wins, so the blob a reader sees is the API's own order minus the repeats. A document that loses nothing is not re-marshalled at all, so an unaffected blob stays byte-for-byte what the API sent, and the input slice is never mutated — the walker still holds the original payload after the call. The resource-to-field mapping is the EXISTING hand-authored attachmentsField table in missing_bilag.go (purchaseAttachments on purchaseResult, saleAttachments on saleResult, the bare attachments on journalEntry), reused rather than copied so the dedupe and the missing-bilag detector cannot drift on which field holds the array. A resource not in that table is returned untouched, including one that happens to carry a field by one of those names. Existing mirror rows are NOT migrated: they are cleaned by the next sync of the resource, which re-upserts the blob.",
+  "files": [
+    "internal/cli/sync.go",
+    "internal/cli/attachment_dedupe.go",
+    "internal/cli/attachment_dedupe_test.go",
+    "internal/cli/missing_bilag.go"
+  ],
+  "call_sites": [
+    "PATCH(attachment-dedupe)",
+    "items = dedupeAttachmentArrays(resource, items)",
+    "func dedupeAttachmentArrays(resource string, items []json.RawMessage) []json.RawMessage {",
+    "var attachmentDedupeKeys = []string{\"uuid\", \"identifier\", \"downloadUrl\"}",
+    "func attachmentIdentity(entry json.RawMessage) (string, bool) {",
+    "var attachmentsField = map[string]string{",
+    "\"purchases\":       \"purchaseAttachments\",",
+    "\"sales\":           \"saleAttachments\",",
+    "\"journal_entries\": \"attachments\",",
+    "func TestDedupeAttachmentArrays_CollapsesTheDuplicatePair(t *testing.T) {",
+    "func TestDedupeAttachmentArrays_KeepsDistinctAttachments(t *testing.T) {",
+    "func TestDedupeAttachmentArrays_KeepsEntriesWithoutAnyKey(t *testing.T) {",
+    "func TestDedupeAttachmentArrays_FallsBackThroughTheKeyChain(t *testing.T) {",
+    "func TestDedupeAttachmentArrays_AppliesToTheThreeCarriers(t *testing.T) {",
+    "func TestUpsertResourceBatch_StoresTheDedupedBlob(t *testing.T) {"
+  ],
+  "validated_outcome": "make check green (go vet ./..., go test ./..., scripts/check-boundaries.sh) plus go test -race ./internal/store/... ./internal/cli/.... Hand-authored tests in internal/cli/attachment_dedupe_test.go: TestDedupeAttachmentArrays_CollapsesTheDuplicatePair drives the observed payload (two byte-identical entries) to one, checks the surviving entry keeps its fields, the rest of the document is untouched and the caller's slice still holds the original two; TestDedupeAttachmentArrays_KeepsDistinctAttachments asserts two real documents stay two AND that the unaffected blob is returned as the very same bytes; TestDedupeAttachmentArrays_KeepsEntriesWithoutAnyKey asserts two keyless entries both survive while a uuid pair beside them collapses, in the original order; TestDedupeAttachmentArrays_FallsBackThroughTheKeyChain covers identifier and downloadUrl fallbacks, uuid outranking a differing identifier, differing uuids staying two, and an empty key value counting as no key; TestDedupeAttachmentArrays_AppliesToTheThreeCarriers pins the three field names and that contacts, invoices, credit_notes and transactions are returned untouched even when carrying a field by one of those names; TestUpsertResourceBatch_StoresTheDedupedBlob reads the row back out of a real store and asserts the STORED blob holds one entry, which is the placement claim. That last test was checked RED with the call removed from upsertResourceBatch (stored blob held 2). No live API call was made and no fiken write command was run.",
+  "patch_count": 1
+}

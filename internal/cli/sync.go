@@ -1515,6 +1515,12 @@ type discriminatorDispatch struct {
 var discriminatorDispatchers = map[string]discriminatorDispatch{}
 
 func upsertResourceBatch(db *store.Store, resource string, items []json.RawMessage) (int, int, error) {
+	// PATCH(attachment-dedupe): the API serves the same attachment twice inside
+	// the parent blob (78 of 85 sales on the test company), so every report that
+	// counts or lists attachments double-counts. Cleaned here, before the upsert,
+	// because the detectors and the MCP sql tool read the STORED blob, not the
+	// response (issue #10).
+	items = dedupeAttachmentArrays(resource, items)
 	if _, ok := discriminatorDispatchers[resource]; !ok {
 		return db.UpsertBatch(resource, items)
 	}
