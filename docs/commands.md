@@ -118,6 +118,7 @@ intact, so documents that were attached to a transaction stay attached
 to that transaction.
 - **`fiken-cli inbox get`** - Returns the contents of the inbox for given company.
 - **`fiken-cli inbox get-document`** - Returns the inbox document with specified id
+- **`fiken-cli inbox get-document <slug> <id> --output bilag/`** - Downloads the file behind `documentUrl` into `bilag/` (a file path writes that name, `--output -` streams to stdout)
 
 ### invoices
 
@@ -223,6 +224,7 @@ Manage purchases
 - **`fiken-cli purchases get-draft-attachments`** - Returns all attachments for specified draft.
 - **`fiken-cli purchases get-drafts`** - Returns all purchase drafts for given company.
 - **`fiken-cli purchases update-draft`** - Updates draft with provided id.
+- **`fiken-cli purchases attachments get-purchase <slug> <purchaseId> --output bilag/`** - Downloads every attachment of a purchase (same `--output` on `sales attachments get-sale`); `attachments add-to-purchase` defaults `--filename` to the basename of `--file`
 
 ### sales
 

@@ -38,6 +38,11 @@ func newInboxGetDocumentCmd(flags *rootFlags) *cobra.Command {
 			if err != nil {
 				return classifyAPIError(err, flags)
 			}
+			// PATCH(document-download): --output turns this metadata read into a
+			// file download; see internal/cli/document_download.go.
+			if handled, derr := handleDocumentOutput(cmd, flags, c, path, data); handled {
+				return derr
+			}
 			// Print provenance to stderr for human-facing output only.
 			// Machine-format flags (--json, --csv, --compact, --quiet, --plain,
 			// --select) and piped stdout suppress this line; the JSON envelope
@@ -82,6 +87,9 @@ func newInboxGetDocumentCmd(flags *rootFlags) *cobra.Command {
 			return printOutputWithFlags(cmd.OutOrStdout(), data, flags)
 		},
 	}
+
+	// PATCH(document-download): --output; see internal/cli/document_download.go.
+	registerDocumentOutputFlag(cmd)
 
 	return cmd
 }

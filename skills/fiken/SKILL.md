@@ -240,6 +240,7 @@ Writing to real books requires live mode, which is reached only by `FIKEN_MODE` 
 - `fiken-cli inbox delete-document` — Removes the inbox document with the specified id from the inbox.
 - `fiken-cli inbox get` — Returns the contents of the inbox for given company.
 - `fiken-cli inbox get-document` — Returns the inbox document with specified id
+- `fiken-cli inbox get-document <slug> <id> --output bilag/` — downloads the file behind `documentUrl` into `bilag/` (a file path writes that name, `--output -` streams to stdout)
 
 **invoices** — Manage invoices
 
@@ -325,6 +326,7 @@ Writing to real books requires live mode, which is reached only by `FIKEN_MODE` 
 - `fiken-cli purchases get-draft-attachments` — Returns all attachments for specified draft.
 - `fiken-cli purchases get-drafts` — Returns all purchase drafts for given company.
 - `fiken-cli purchases update-draft` — Updates draft with provided id.
+- `fiken-cli purchases attachments get-purchase <slug> <purchaseId> --output bilag/` — downloads every attachment of a purchase (same `--output` on `sales attachments get-sale`); `attachments add-to-purchase` now defaults `--filename` to the basename of `--file`
 
 **sales** — Manage sales
 

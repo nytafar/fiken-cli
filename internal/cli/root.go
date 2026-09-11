@@ -306,6 +306,11 @@ See README.md or skills/fiken/SKILL.md for recipes.`, // PATCH(root-help-skill-p
 	rootCmd.AddCommand(newUserPromotedCmd(flags))
 	rootCmd.AddCommand(newVersionCmd())
 
+	// PATCH(document-download): every add-attachment command defaults --filename
+	// to the basename of --file. Wrapping the built tree once keeps the
+	// generated multipart commands untouched. See document_download.go.
+	applyAttachmentFilenameDefaults(rootCmd)
+
 	return rootCmd
 }
 

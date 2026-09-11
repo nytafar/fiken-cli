@@ -2,6 +2,16 @@
 
 This file is maintained by printing-press-library release automation. Do not hand-edit release sections in normal PRs.
 
+## Unreleased
+
+### Added
+
+- `inbox get-document --output <path>` downloads the file behind the document's `documentUrl` through the authenticated client instead of leaving the bearer token to be curled by hand: a file path writes that name, a directory (or a trailing `/`) writes the document's own filename, `-` streams to stdout, and `--dry-run` prints the request without fetching. `purchases attachments get-purchase` and `sales attachments get-sale` take the same flag and write every attachment into the directory given. `--agent`/JSON mode prints `{"path":…,"bytes":…,"filename":…}` for one file and `{"files":[…],"count":…,"bytes":…}` for several (#23).
+
+### Fixed
+
+- The add-attachment commands (`purchases`/`sales`/`contacts`/`journal-entries` `attachments`, the `add-attachment-to-draft` family and `inbox create-document`) default `--filename` to the basename of `--file`, so an upload that omits it no longer fails with HTTP 400 `filename must be specified` (#23).
+
 ## 2.1.0 - 2026-09-11
 
 ### Fixed

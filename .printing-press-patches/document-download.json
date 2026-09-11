@@ -1,0 +1,30 @@
+{
+  "schema_version": 2,
+  "id": "document-download",
+  "applied_at": "2026-09-11",
+  "base_run_id": "20260609-145046",
+  "base_printing_press_version": "4.24.0",
+  "summary": "feat(documents): --output downloads the file behind documentUrl/downloadUrl, and --filename defaults to the basename of --file (issue #23)",
+  "reason": "Every printed request path decodes its response as JSON, so the file an inbox document or a purchase attachment exists for was unreachable: `inbox get-document` returned a documentUrl and nothing fetched it. The only route was to read access_token out of ~/.config/fiken-cli/config.toml and curl the URL, which puts the token in shell history and is not something an agent should do. The download itself is hand-authored (internal/client/download.go streams the bytes through the client's own auth and HTTP client; internal/cli/document_download.go resolves the target and reports the result), so the generated-file diff is only the wiring: on inbox get-document, purchases attachments get-purchase and sales attachments get-sale, one call to handleDocumentOutput() immediately after the metadata read (it returns handled=false without --output, so the printed rendering is untouched) plus one registerDocumentOutputFlag(cmd) before the command is returned. The second half of the issue is the --filename trap: Fiken answers HTTP 400 'filename must be specified' when a multipart upload omits it, and twelve printed add-attachment commands take --filename as an optional flag. Defaulting it in each command would be twelve generated-file edits; instead applyAttachmentFilenameDefaults() wraps PreRunE on every command in the built tree that carries both --file and --filename, which is one call site in newRootCmd and also covers an add-attachment command a future print adds. A reprint that drops these call sites loses the download commands and reopens the 400.",
+  "files": [
+    "internal/cli/inbox_get-document.go",
+    "internal/cli/purchases_attachments_get-purchase.go",
+    "internal/cli/sales_attachments_get-sale.go",
+    "internal/cli/root.go",
+    "internal/cli/document_download.go",
+    "internal/cli/document_download_test.go",
+    "internal/client/download.go",
+    "internal/client/download_test.go"
+  ],
+  "call_sites": [
+    "PATCH(document-download)",
+    "handleDocumentOutput(cmd, flags, c, path, data)",
+    "registerDocumentOutputFlag(cmd)",
+    "applyAttachmentFilenameDefaults(rootCmd)",
+    "func (c *Client) DownloadFile(",
+    "func TestInboxGetDocument_OutputWritesFileAndPrintsJSON(t *testing.T) {",
+    "func TestAddAttachmentCommands_DefaultFilenameToFileBasename(t *testing.T) {"
+  ],
+  "validated_outcome": "make check green: go vet ./..., go test ./... and scripts/check-boundaries.sh. internal/cli/document_download_test.go drives the real command tree against an httptest Fiken serving both the metadata and the file bytes (file target, directory target, --output -, --dry-run, a two-attachment purchase) and asserts the download carries the bearer token; internal/client/download_test.go pins the bytes, the Content-Disposition name, the *APIError on a 4xx and that a foreign host gets no credential. No live API call was made.",
+  "patch_count": 4
+}
