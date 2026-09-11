@@ -2106,6 +2106,12 @@ func syncDependentResource(ctx context.Context, c interface {
 				emitResultCountMismatch(syncEvents, dep.Name, parentID, parentPageInfo.ResultCount, depLanded.Len())
 			}
 		}
+		// PATCH(sync-full-deletes): the mirror had no way to lose a row Fiken
+		// deleted (issue #17). A complete, unwindowed, untruncated pull of this
+		// company's collection — proven complete by the count check just above —
+		// is the only thing that makes an absent row evidence of a deletion, so
+		// the sweep is here, per parent, and consults all three of them.
+		syncPruneDeletedRows(db, syncEvents, dep.Name, parentID, depLanded, parentPageInfo, parentTruncated, depWindowedPull)
 		if parentTruncated {
 			depWalkTruncated = true
 		}
