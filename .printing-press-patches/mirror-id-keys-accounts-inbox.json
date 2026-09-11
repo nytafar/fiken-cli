@@ -1,0 +1,24 @@
+{
+  "schema_version": 2,
+  "id": "mirror-id-keys-accounts-inbox",
+  "applied_at": "2026-09-11",
+  "base_run_id": "20260609-145046",
+  "base_printing_press_version": "4.24.0",
+  "summary": "fix(mirror): key accounts on code and inbox on documentId instead of the display name (issue #16)",
+  "reason": "The profiler templated `name` as the IDField for accounts and inbox because neither schema has a field the generic fallback list recognises before `name` (account has code+name; inboxResult has documentId, not id). `name` is a display field: two accounts in one company with the same name collapse into one mirror row, an account rename lands as a second row and leaves the old one behind, and two inbox documents with the same filename collide the same way. The account schema's `code` (spec.yaml:4454, four digits or four digits plus a reskontro suffix) is what every command and detector addresses accounts by, and `documentId` (spec.yaml:5281) is the path parameter of getInboxDocument. The change is two map entries in each of the two printed copies of resourceIDFieldOverrides (internal/store/store.go and internal/cli/sync.go). No API behaviour changes; existing mirror rows keyed on name are not migrated and are replaced by a per-company full resync of the accounts and inbox resources.",
+  "files": [
+    "internal/store/store.go",
+    "internal/cli/sync.go",
+    "internal/store/mirror_id_keys_test.go",
+    "internal/cli/mirror_id_keys_test.go"
+  ],
+  "call_sites": [
+    "PATCH(mirror-id-keys-accounts-inbox)",
+    "\"accounts\":      \"code\",",
+    "\"inbox\":           \"documentId\",",
+    "func TestExtractResourceID_AccountsKeyOnCode(t *testing.T) {",
+    "func TestSyncIDFieldOverrides_MatchStoreForFixedResources(t *testing.T) {"
+  ],
+  "validated_outcome": "go vet ./..., go test -count=1 ./... and scripts/check-boundaries.sh pass. Hand-authored tests: TestExtractResourceID_AccountsKeyOnCode, TestExtractResourceID_InboxKeyOnDocumentID, TestResourceIDFieldOverrides_NoDisplayNameKeys (internal/store) and TestSyncIDFieldOverrides_MatchStoreForFixedResources (internal/cli). No API call was made.",
+  "patch_count": 2
+}

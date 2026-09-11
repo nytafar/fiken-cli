@@ -2470,11 +2470,15 @@ func (s *Store) UpsertTransactionsDelete(data json.RawMessage) error {
 // child path-item annotated with x-resource-id resolves the same as a flat
 // path-item.
 var resourceIDFieldOverrides = map[string]string{
-	"accounts":        "name",
-	"bank_accounts":   "bankAccountId",
-	"companies":       "slug",
-	"contacts":        "contactId",
-	"inbox":           "name",
+	// PATCH(mirror-id-keys-accounts-inbox): key on the account code, not the
+	// display name (issue #16).
+	"accounts":      "code",
+	"bank_accounts": "bankAccountId",
+	"companies":     "slug",
+	"contacts":      "contactId",
+	// PATCH(mirror-id-keys-accounts-inbox): key on documentId, the path id of
+	// getInboxDocument, not the display name (issue #16).
+	"inbox":           "documentId",
 	"journal_entries": "journalEntryId",
 	"products":        "productId",
 	"projects":        "projectId",
