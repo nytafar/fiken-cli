@@ -18,7 +18,10 @@
 //     issue #12 failure class the check exists to catch.
 //
 // Counting DISTINCT storage keys — the key store.UpsertBatch lands the row
-// under — makes "rows" mean rows. The set keeps insertion order so issue #17
+// under — makes "rows" mean rows. The set therefore covers the UpsertBatch
+// path and nothing else; a walk that stored a row any other way (the flat
+// walker's single-object branch) is not comparable at all and says so with its
+// truncated flag. The set keeps insertion order so issue #17
 // can diff "ids the API served for this parent" against "ids the mirror holds"
 // without a second walk.
 package cli
@@ -51,8 +54,12 @@ func (l *landedIDs) addBatch(resource string, items []json.RawMessage) {
 	}
 }
 
-// add records a single item, e.g. the single-object response body the flat
-// walker stores when a list endpoint answers with one object.
+// add records a single item of a page addBatch is walking. It is only valid
+// for items that go through store.UpsertBatch: the single-object branch of the
+// flat walker calls upsertSingleObject, which keys the row by a different route
+// (a typed upsert on extractObjectID, or the resource name itself when the body
+// is not an object), so StorageKeyOf cannot say what landed there. That branch
+// marks its walk non-comparable instead of feeding this set.
 func (l *landedIDs) add(resource string, item json.RawMessage) {
 	if l == nil {
 		return

@@ -15,6 +15,10 @@
 // ExtractResourceID is exported but resourceStorageID is not, and the storage
 // key is id-plus-parent for every parent-keyed resource, so the key a row
 // actually lands under is only computable in here.
+//
+// The promise is scoped to UpsertBatch. Rows that land through the single-object
+// fallback (upsertSingleObject) are keyed by a different route entirely, so this
+// file answers for the batch path only.
 package store
 
 import "encoding/json"
@@ -25,6 +29,13 @@ import "encoding/json"
 // extract failure). The item must already carry whatever the sync walker adds
 // before the upsert (parent_id on the dependent path), because the parent
 // value is part of the key.
+//
+// UpsertBatch is the ONLY path this answers for. The single-object upsert the
+// flat sync walker falls back to dispatches to a typed Upsert<Resource> keyed
+// on extractObjectID (no resourceIDFieldOverrides), and stores a non-object
+// body under the resource name with no id at all; a false from here for such a
+// body means "not this path", not "nothing landed", so a caller counting rows
+// must not treat a single-object response as comparable.
 func StorageKeyOf(resourceType string, item json.RawMessage) (string, bool) {
 	canonical, err := CanonicalResource(resourceType)
 	if err != nil {

@@ -22,7 +22,9 @@
 //     must leave the recorded value alone rather than overwrite it with a
 //     partial sum.
 //   - syncSinceParamFor is the one place that answers "did this pull carry a
-//     temporal filter", which is what makes a pull windowed.
+//     temporal filter", and syncPullIsWindowed the one place that answers "did
+//     this pull ask for a subset of the collection", which is what makes a
+//     recorded result count unsafe.
 package cli
 
 import (
@@ -114,6 +116,51 @@ func syncSinceParamFor(resource string) string {
 		}
 	}
 	return syncResourceSinceParam(resource)
+}
+
+// syncPullIsWindowed reports whether this request asked the API for a subset of
+// the collection, so Fiken-Api-Result-Count describes that subset rather than
+// the whole thing and must not be recorded beside the mirror-wide total_count.
+//
+// Two things narrow a pull. The temporal window (--since or the stored
+// watermark) arrives as a non-empty effectiveSince. The other is the user's own
+// query parameters: `sync --resource-param accounts:lastModifiedGe=2026-09-01`
+// is every bit as much a windowed pull, and the walkers computed windowedness
+// before userParams.applyTo injected them, so the filtered Result-Count was
+// recorded as the collection total.
+//
+// Any applicable user parameter counts, not just the ones that look like
+// filters: the walker cannot tell a filter from a formatting flag, and the
+// conservative answer (leave the previously recorded number alone) is the one
+// that cannot publish a wrong total. isDependent mirrors applyTo: the dependent
+// path is already scoped by its parent path segment and skips --param.
+func syncPullIsWindowed(effectiveSince string, userParams *syncUserParams, resource string, isDependent bool) bool {
+	if effectiveSince != "" {
+		return true
+	}
+	if userParams == nil {
+		return false
+	}
+	if !isDependent && len(userParams.flatGlobal) > 0 {
+		return true
+	}
+	return len(userParams.trueGlobal) > 0 || len(userParams.perResource[resource]) > 0
+}
+
+// everyParentAccountedFor is the "seen" input of shouldRecordResultCount for a
+// dependent walk: the summed result count is only on the collection's scale
+// when every parent said what its own collection holds.
+//
+// A parent either returned a page carrying Fiken-Api-Result-Count, or it denied
+// access before serving one. A denied parent lands zero rows and adds zero to
+// the total, so demanding a header from it is demanding one that cannot exist:
+// a single Fiken book without the API module activated (403 on every dependent
+// endpoint) kept the whole mirror's dependent result counts at NULL, which is
+// the state the first full resync landed in. A parent that DID serve a page
+// without the header is different — the total is then genuinely short by an
+// unknown amount — and still blocks recording.
+func everyParentAccountedFor(parentsWithResultCount, parentsDeniedWithoutPage, parents int) bool {
+	return parentsWithResultCount+parentsDeniedWithoutPage == parents
 }
 
 // recordSyncResultCount persists the API's own row count for a resource when

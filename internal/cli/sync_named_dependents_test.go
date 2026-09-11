@@ -12,6 +12,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -253,6 +254,100 @@ func TestSync_DependentWithEmptyParentTableWarns(t *testing.T) {
 	}
 	if hint, _ := warning["hint"].(string); !strings.Contains(hint, "--resources companies") {
 		t.Fatalf("warning hint = %v, want the companies-first fix", warning["hint"])
+	}
+
+	summary := eventsOfType(events, "sync_summary")[0]
+	for key, want := range map[string]int{"resources": 1, "success": 0, "warned": 1, "errored": 0} {
+		got, ok := summary[key].(float64)
+		if !ok || int(got) != want {
+			t.Fatalf("sync_summary %s = %v, want %d\n%s", key, summary[key], want, env.out.String())
+		}
+	}
+}
+
+// TestSyncDependentResource_ParentQueryErrorIsAnError: every error path of
+// dependentParentRows hands back nil rows, so an "err or empty" branch that
+// looked at the rows first could never reach its error case — a locked or
+// corrupt mirror was reported as parent_table_empty with a hint to sync a
+// parent table that may well be full. The error has to win.
+func TestSyncDependentResource_ParentQueryErrorIsAnError(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "data.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	// A closed handle is the cheapest stand-in for the unreadable mirror:
+	// every query against it fails, which is what the branch must report.
+	if err := db.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	dep := dependentResourceDef{
+		Name: "journal_entries", ParentTable: "companies", ParentIDParam: "companySlug",
+		PathTemplate: "/companies/{companySlug}/journalEntries", KeyField: "slug",
+		PathParams: []dependentPathParamDef{{Param: "companySlug", Field: "slug"}},
+	}
+	var events bytes.Buffer
+	res := syncDependentResource(context.Background(), nil, db, dep, "", true, 0, false, nil, &events)
+
+	if res.Err == nil {
+		t.Fatalf("syncDependentResource on an unreadable mirror returned Err nil (warn %v)\n%s", res.Warn, events.String())
+	}
+	if !strings.Contains(res.Err.Error(), "querying parent table companies") {
+		t.Fatalf("error = %v, want it to name the failed parent query", res.Err)
+	}
+	if res.Warn != nil {
+		t.Fatalf("warn = %v, want nil: a DB failure is not a skip", res.Warn)
+	}
+	if strings.Contains(events.String(), "parent_table_empty") {
+		t.Fatalf("a DB failure was reported as an empty parent table\n%s", events.String())
+	}
+}
+
+// TestSync_CompanyNotInParentTableWarns: --company filters the parent rows
+// after the query, so a typo'd slug empties a fully hydrated parent set. That
+// used to read as parent_table_empty ("run sync --resources companies first")
+// against a mirror whose companies table was not empty at all. It is its own
+// reason, with the slug in the event.
+func TestSync_CompanyNotInParentTableWarns(t *testing.T) {
+	env := newSyncTestEnv(t, 3)
+	t.Cleanup(func() { syncCompanyScope = "" })
+
+	err := env.run(t, "--resources", "journal_entries", "--company", "nosuchco")
+	if err == nil {
+		t.Fatalf("sync --company nosuchco returned nil, want the all-warned exit\n%s", env.out.String())
+	}
+	// The summary message covers every warn reason now that they are no longer
+	// all access denials.
+	if strings.Contains(err.Error(), "insufficient access") {
+		t.Fatalf("all-warned exit said %q, but no resource was access-denied", err)
+	}
+	if !strings.Contains(err.Error(), "sync_warning") {
+		t.Fatalf("all-warned exit = %q, want it to point at the sync_warning events", err)
+	}
+
+	events := env.events(t)
+	var warning map[string]any
+	for _, ev := range eventsOfType(events, "sync_warning") {
+		if ev["reason"] == "company_not_in_parent_table" {
+			warning = ev
+		}
+	}
+	if warning == nil {
+		t.Fatalf("no company_not_in_parent_table sync_warning\n%s", env.out.String())
+	}
+	for key, want := range map[string]string{"resource": "journal_entries", "parent_table": "companies", "company": "nosuchco"} {
+		if warning[key] != want {
+			t.Fatalf("warning %s = %v, want %s", key, warning[key], want)
+		}
+	}
+	if hint, _ := warning["hint"].(string); !strings.Contains(hint, "--company") {
+		t.Fatalf("warning hint = %v, want the slug named as the likely fix", warning["hint"])
+	}
+	// The mirror does hold a company, so the empty-table reason must not fire.
+	for _, ev := range eventsOfType(events, "sync_warning") {
+		if ev["reason"] == "parent_table_empty" {
+			t.Fatalf("a scoped-out company was reported as an empty parent table: %v", ev)
+		}
 	}
 
 	summary := eventsOfType(events, "sync_summary")[0]

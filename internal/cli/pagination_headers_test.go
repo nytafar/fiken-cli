@@ -632,3 +632,167 @@ func TestPaginatedRead_EmptyCollectionPublishesZeroCounts(t *testing.T) {
 		t.Fatalf("meta.result_count = %v, want 0", meta["result_count"])
 	}
 }
+
+// scalarBodyServer answers with a valid JSON body that is neither an array nor
+// an object — a shape the flat walker routes to its single-object branch — and
+// still sets the result-count headers.
+type scalarBodyServer struct {
+	body    string
+	claimed int
+}
+
+func (s *scalarBodyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set(client.HeaderPage, "0")
+	w.Header().Set(client.HeaderPageSize, "100")
+	w.Header().Set(client.HeaderPageCount, "1")
+	w.Header().Set(client.HeaderResultCount, strconv.Itoa(s.claimed))
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = io.WriteString(w, s.body)
+}
+
+// TestSyncResource_SingleObjectBodyIsNotComparable: the single-object branch
+// does not upsert through UpsertBatch, so store.StorageKeyOf cannot say what it
+// landed under — feeding landedIDs from there reported rows 0 for a body that
+// did land, invented a result_count_mismatch on a healthy resource, and
+// recorded that same header as the collection total. A response with no
+// comparable row count must produce no anomaly and record nothing.
+func TestSyncResource_SingleObjectBodyIsNotComparable(t *testing.T) {
+	srv := httptest.NewServer(&scalarBodyServer{body: `"ok"`, claimed: 1})
+	t.Cleanup(srv.Close)
+	c := client.New(&config.Config{BaseURL: srv.URL, AccessToken: "test-token"}, 10*time.Second, 0)
+	c.NoCache = true
+
+	db := openTestStore(t)
+	var events bytes.Buffer
+	res := syncResource(context.Background(), c, db, "companies", "", true, 0, false, nil, &events)
+	if res.Err != nil {
+		t.Fatalf("syncResource: %v", res.Err)
+	}
+	if anomalies := countAnomalies(t, events.String(), "result_count_mismatch"); len(anomalies) != 0 {
+		t.Fatalf("a single-object body produced %d result_count_mismatch events, want 0\n%s", len(anomalies), events.String())
+	}
+	if got, ok := db.SyncResultCount("companies"); ok {
+		t.Fatalf("recorded result count = (%d, true) after a non-comparable walk, want nothing recorded", got)
+	}
+}
+
+// TestSyncResource_ResourceParamPullKeepsRecordedResultCount is the other half
+// of the windowed rule: --resource-param is a filter the user sent, so Fiken
+// answers with the FILTERED Result-Count. windowedPull was computed before
+// userParams.applyTo injected the parameter, so that filtered number was
+// recorded as the collection total.
+func TestSyncResource_ResourceParamPullKeepsRecordedResultCount(t *testing.T) {
+	db := openTestStore(t)
+	if err := db.SaveSyncResultCount("companies", 577); err != nil {
+		t.Fatalf("SaveSyncResultCount: %v", err)
+	}
+
+	userParams, err := parseSyncUserParams(nil, []string{"companies:lastModifiedGe=2026-09-01"}, nil)
+	if err != nil {
+		t.Fatalf("parseSyncUserParams: %v", err)
+	}
+
+	rs, c := newRowServer(t, companyRows("co-000", "co-001"), 100, 2)
+	var events bytes.Buffer
+	if res := syncResource(context.Background(), c, db, "companies", "", true, 0, false, userParams, &events); res.Err != nil {
+		t.Fatalf("syncResource: %v", res.Err)
+	}
+
+	// The parameter still reaches the API: this is about what gets recorded,
+	// not about suppressing the filter.
+	params := rs.requestParams()
+	if len(params) == 0 || params[0].Get("lastModifiedGe") != "2026-09-01" {
+		t.Fatalf("request params = %v, want lastModifiedGe on the first request", params)
+	}
+	if got, ok := db.SyncResultCount("companies"); !ok || got != 577 {
+		t.Fatalf("recorded result count after a --resource-param pull = (%d, %v), want (577, true)", got, ok)
+	}
+
+	// The control: the same walk without user params records what it saw.
+	_, c2 := newRowServer(t, companyRows("co-000", "co-001"), 100, 2)
+	if res := syncResource(context.Background(), c2, db, "companies", "", true, 0, false, nil, &events); res.Err != nil {
+		t.Fatalf("unfiltered syncResource: %v", res.Err)
+	}
+	if got, ok := db.SyncResultCount("companies"); !ok || got != 2 {
+		t.Fatalf("recorded result count after an unfiltered pull = (%d, %v), want (2, true)", got, ok)
+	}
+}
+
+// deniedParentServer answers one company's dependent endpoint with 403 (a Fiken
+// book whose API module is not activated) and serves a complete, header-carrying
+// collection for every other company.
+type deniedParentServer struct {
+	deniedSlug string
+	rows       []string
+}
+
+func (s *deniedParentServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if strings.Contains(r.URL.Path, "/"+s.deniedSlug+"/") {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, `{"message":"API module not activated"}`)
+		return
+	}
+	items := make([]json.RawMessage, 0, len(s.rows))
+	if page := r.URL.Query().Get("page"); page == "" || page == "0" {
+		for _, row := range s.rows {
+			items = append(items, json.RawMessage(row))
+		}
+	}
+	body, _ := json.Marshal(items)
+	w.Header().Set(client.HeaderPage, "0")
+	w.Header().Set(client.HeaderPageSize, "100")
+	w.Header().Set(client.HeaderPageCount, "1")
+	w.Header().Set(client.HeaderResultCount, strconv.Itoa(len(s.rows)))
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(body)
+}
+
+// TestSyncDependentResource_AccessDeniedParentDoesNotBlockRecording is what the
+// first full resync found: one of four companies answers 403 on every dependent
+// endpoint, so it carries no result-count header, and the "headers present for
+// every parent" rule left result_count NULL for every dependent resource in the
+// mirror. A parent that denied access before serving a page landed zero rows and
+// added zero to the total, so it is accounted for — the recorded number is the
+// sum over the parents that did answer.
+func TestSyncDependentResource_AccessDeniedParentDoesNotBlockRecording(t *testing.T) {
+	srv := httptest.NewServer(&deniedParentServer{
+		deniedSlug: "denied-co",
+		rows:       []string{`{"code":"1500","name":"Account A"}`, `{"code":"1501","name":"Account B"}`},
+	})
+	t.Cleanup(srv.Close)
+	c := client.New(&config.Config{BaseURL: srv.URL, AccessToken: "test-token"}, 10*time.Second, 0)
+	c.NoCache = true
+
+	db := openTestStore(t)
+	if _, _, err := db.UpsertBatch("companies", []json.RawMessage{
+		json.RawMessage(`{"slug":"denied-co","name":"No API Module"}`),
+		json.RawMessage(`{"slug":"good-co","name":"Complete Book"}`),
+	}); err != nil {
+		t.Fatalf("seed companies: %v", err)
+	}
+
+	dep := dependentResourceDef{
+		Name:          "accounts",
+		ParentTable:   "companies",
+		ParentIDParam: "companySlug",
+		PathTemplate:  "/companies/{companySlug}/accounts",
+		KeyField:      "slug",
+		PathParams:    []dependentPathParamDef{{Param: "companySlug", Field: "slug"}},
+	}
+	var events bytes.Buffer
+	res := syncDependentResource(context.Background(), c, db, dep, "", true, 0, false, nil, &events)
+	if res.Err != nil {
+		t.Fatalf("syncDependentResource: %v", res.Err)
+	}
+	if anomalies := countAnomalies(t, events.String(), "result_count_mismatch"); len(anomalies) != 0 {
+		t.Fatalf("result_count_mismatch events = %v, want none\n%s", anomalies, events.String())
+	}
+	if got, ok := db.SyncResultCount("accounts"); !ok || got != 2 {
+		t.Fatalf("recorded result count = (%d, %v), want (2, true): the denied parent must not block recording\n%s", got, ok, events.String())
+	}
+	// The denial itself is still reported.
+	if !strings.Contains(events.String(), `"reason":"forbidden"`) {
+		t.Fatalf("the 403 parent was not reported\n%s", events.String())
+	}
+}

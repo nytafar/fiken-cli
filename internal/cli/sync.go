@@ -352,7 +352,12 @@ Resource scoping:
 			}
 			if successCount == 0 {
 				if warnCount > 0 && errCount == 0 {
-					return fmt.Errorf("%d resource(s) skipped due to insufficient access", warnCount)
+					// PATCH(sync-named-dependents): a warned resource is no longer
+					// always an access denial — parent_table_empty and
+					// company_not_in_parent_table warn too — so the message points
+					// at the events that carry the reason instead of naming one
+					// cause for all of them (issue #14).
+					return fmt.Errorf("%d resource(s) skipped without error; see the sync_warning events for the reasons", warnCount)
 				}
 				if errCount > 0 {
 					return fmt.Errorf("%d resource(s) failed to sync", errCount)
@@ -504,10 +509,12 @@ func syncResource(ctx context.Context, c interface {
 	// Fiken-Api-Result-Count; the same applies to every early exit below
 	// (issue #15). Only an uncapped walk over a whole collection is compared.
 	walkTruncated := cursor != ""
-	// PATCH(pagination-headers): an incremental pull asks the API for a window
-	// and gets that window's Result-Count back, which must not overwrite the
+	// PATCH(pagination-headers): a pull that asks for a subset of the collection
+	// gets that subset's Result-Count back, which must not overwrite the
 	// full-collection number recorded beside sync_state.total_count (issue #15).
-	windowedPull := effectiveSince != ""
+	// Computed from the same inputs userParams.applyTo injects below, so a
+	// --param / --resource-param filter counts as a window too.
+	windowedPull := syncPullIsWindowed(effectiveSince, userParams, resource, false)
 	// PATCH(pagination-headers): distinct storage keys landed, which is what
 	// "rows" has to mean when it is compared with Result-Count.
 	landed := newLandedIDs()
@@ -625,7 +632,12 @@ func syncResource(ctx context.Context, c interface {
 				}
 				return syncResult{Resource: resource, Err: err, Duration: time.Since(started)}
 			}
-			landed.add(resource, data) // PATCH(pagination-headers)
+			// PATCH(pagination-headers): a single-object body does not go through
+			// UpsertBatch, so store.StorageKeyOf cannot say what it landed under
+			// (a non-object body lands under the resource name with no key at
+			// all). The walk has no comparable row count, so neither the
+			// mismatch check nor the recorded value may use it (issue #15).
+			walkTruncated = true
 			totalCount++
 			break
 		}
@@ -1719,15 +1731,26 @@ func syncDependentResource(ctx context.Context, c interface {
 		pathParams = []dependentPathParamDef{{Param: dep.ParentIDParam, Field: field}}
 	}
 	parentRows, err := dependentParentRows(db, dep.ParentTable, pathParams)
+	// PATCH(sync-named-dependents): the error is tested FIRST. Every error path
+	// of dependentParentRows returns nil rows, so an err-or-empty branch that
+	// looked at the rows first reported a locked or corrupt mirror as
+	// parent_table_empty, with a hint to sync a parent table that may be full
+	// (issue #14 follow-up).
+	if err != nil {
+		return syncResult{Resource: dep.Name, Err: fmt.Errorf("querying parent table %s: %w", dep.ParentTable, err), Duration: time.Since(started)}
+	}
+	unscopedParents := len(parentRows)
 	// PATCH(mirror-canonical-resource-name): honour --company.
 	parentRows = scopeParentRowsToCompany(dep.ParentTable, parentRows)
-	if err != nil || len(parentRows) == 0 {
-		if len(parentRows) == 0 {
-			// PATCH(sync-named-dependents): a machine-mode run used to read this
-			// as a plain success (issue #14 follow-up).
-			return dependentParentEmptyResult(syncEvents, dep.Name, dep.ParentTable, started)
+	if len(parentRows) == 0 {
+		// PATCH(sync-named-dependents): a machine-mode run used to read this as a
+		// plain success (issue #14 follow-up). An empty parent TABLE and a
+		// --company slug that matches no parent row are different repairs, so
+		// they are different reasons.
+		if unscopedParents > 0 {
+			return dependentCompanyNotInParentResult(syncEvents, dep.Name, dep.ParentTable, syncCompanyScope, started)
 		}
-		return syncResult{Resource: dep.Name, Err: fmt.Errorf("querying parent table %s: %w", dep.ParentTable, err), Duration: time.Since(started)}
+		return dependentParentEmptyResult(syncEvents, dep.Name, dep.ParentTable, started)
 	}
 
 	if humanFriendly {
@@ -1761,11 +1784,12 @@ func syncDependentResource(ctx context.Context, c interface {
 	// parents this run walked, and whether every one of them reported it.
 	depResultCountTotal := 0
 	depParentsWithResultCount := 0
+	depParentsDeniedWithoutPage := 0
 	depWalkTruncated := false
 	// PATCH(pagination-headers): distinct storage keys landed for the parent
 	// being walked, and whether this pull carried an incremental window.
 	depLanded := newLandedIDs()
-	depWindowedPull := depSinceTS != ""
+	depWindowedPull := syncPullIsWindowed(depSinceTS, userParams, dep.Name, true)
 	parentFKKey := dep.ParentTable + "_id"
 
 	for idx, parentRow := range parentRows {
@@ -1813,8 +1837,10 @@ func syncDependentResource(ctx context.Context, c interface {
 				// Non-fatal per parent: log and continue to next parent.
 				// Track access-denial separately so an all-denied dependent
 				// resource can surface as a Warn rather than silent success.
+				parentAccessDenied := false
 				if w, ok := isSyncAccessWarning(err); ok {
 					deniedParents++
+					parentAccessDenied = true
 					if firstDenial == nil {
 						firstDenial = w
 					}
@@ -1831,7 +1857,17 @@ func syncDependentResource(ctx context.Context, c interface {
 					// sync_error so the API body and status are inspectable.
 					fmt.Fprintln(syncEvents, syncErrorJSON(dep.Name, parentID, err))
 				}
-				parentTruncated = true // PATCH(pagination-headers)
+				// PATCH(pagination-headers): a parent that denied access before
+				// serving a page landed no rows and contributes nothing to the
+				// collection total, so it is walked-with-zero rather than a
+				// truncated walk. One 403 company (a Fiken book without the API
+				// module) otherwise blocked the recorded result_count for every
+				// dependent resource of the whole mirror (issue #15).
+				if parentAccessDenied && pagesFetched == 0 {
+					depParentsDeniedWithoutPage++
+				} else {
+					parentTruncated = true
+				}
 				break
 			}
 
@@ -2004,10 +2040,11 @@ func syncDependentResource(ctx context.Context, c interface {
 
 	// PATCH(mirror-canonical-resource-name): persist the real row count (issue #6 §3).
 	_ = db.SaveSyncState(dep.Name, "", syncStateTotalCount(db, dep.Name, totalCount))
-	// PATCH(pagination-headers): only a run that walked every parent to the end
-	// with the header present produces a number on the same scale as
-	// total_count, which is mirror-wide (issue #15).
-	recordSyncResultCount(db, dep.Name, depResultCountTotal, shouldRecordResultCount(depParentsWithResultCount == len(parentRows), depWalkTruncated, depWindowedPull))
+	// PATCH(pagination-headers): only a run that walked every parent to the end,
+	// with each one either carrying the header or denying access before serving
+	// a page, produces a number on the same scale as total_count, which is
+	// mirror-wide (issue #15).
+	recordSyncResultCount(db, dep.Name, depResultCountTotal, shouldRecordResultCount(everyParentAccountedFor(depParentsWithResultCount, depParentsDeniedWithoutPage, len(parentRows)), depWalkTruncated, depWindowedPull))
 
 	// F4b symptom probe: items consumed and extracted but nothing landed.
 	// See syncResource for rationale.

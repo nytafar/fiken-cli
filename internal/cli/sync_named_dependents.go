@@ -21,6 +21,12 @@
 // printed a line only under --human-friendly and returned a bare success. A
 // machine-mode caller could not tell "synced nothing because nothing changed"
 // from "synced nothing because the mirror has no companies yet".
+//
+// dependentCompanyNotInParentResult is the same warning's other half. --company
+// filters the parent rows AFTER the query (scopeParentRowsToCompany), so a
+// typo'd slug empties a perfectly hydrated parent set and the run reported
+// parent_table_empty with a hint to sync a table that is already full. The two
+// states need different repairs, so they are different reasons.
 package cli
 
 import (
@@ -59,6 +65,40 @@ func dependentParentEmptyResult(syncEvents io.Writer, resource, parentTable stri
 	return syncResult{
 		Resource: resource,
 		Warn:     fmt.Errorf("skipped %s: parent table %s is empty", resource, parentTable),
+		Duration: time.Since(started),
+	}
+}
+
+// dependentCompanyNotInParentResult reports a dependent resource whose parent
+// table holds rows but none for the --company slug in force, and returns the
+// warned result that makes the summary say so. Same Warn shape as
+// dependentParentEmptyResult: a warned resource is not an error.
+func dependentCompanyNotInParentResult(syncEvents io.Writer, resource, parentTable, company string, started time.Time) syncResult {
+	hint := fmt.Sprintf("check the --company slug or run fiken-cli sync --resources %s", parentTable)
+	if humanFriendly {
+		fmt.Fprintf(os.Stderr, "  %s: skipping (no %s row matches --company %s — %s)\n", resource, parentTable, company, hint)
+	} else if syncEvents != nil {
+		payload := struct {
+			Event       string `json:"event"`
+			Resource    string `json:"resource"`
+			Reason      string `json:"reason"`
+			ParentTable string `json:"parent_table"`
+			Company     string `json:"company"`
+			Hint        string `json:"hint"`
+		}{
+			Event:       "sync_warning",
+			Resource:    resource,
+			Reason:      "company_not_in_parent_table",
+			ParentTable: parentTable,
+			Company:     company,
+			Hint:        hint,
+		}
+		out, _ := json.Marshal(payload)
+		fmt.Fprintf(syncEvents, "%s\n", out)
+	}
+	return syncResult{
+		Resource: resource,
+		Warn:     fmt.Errorf("skipped %s: no %s row matches company %s", resource, parentTable, company),
 		Duration: time.Since(started),
 	}
 }
