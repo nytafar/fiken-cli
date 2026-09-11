@@ -67,7 +67,7 @@ Verify with `fiken-cli --version`. If it's not found, add `$(go env GOPATH)/bin`
 
 ### Agent skill
 
-`./install.sh` copies every skill under `skills/` into `~/.claude/skills/` (`fiken` for the CLI, `fiken-superforing` for browser bank matching), so Claude Code (and any agent that reads `~/.claude/skills/`) triggers it on Fiken requests — bankavstemming, unmatched bank transactions, rounding errors, mis-coded VAT, MVA summaries, etc. Set `FIKEN_SKILLS_ROOT` to install them elsewhere.
+`./install.sh` installs every skill under `skills/` (`fiken` for the CLI, `fiken-superforing` for browser bank matching) through [`npx skills`](https://skills.sh/), which handles placement, updates and removal, so Claude Code (and any agent that reads `~/.claude/skills/`) triggers it on Fiken requests — bankavstemming, unmatched bank transactions, rounding errors, mis-coded VAT, MVA summaries, etc. Set `FIKEN_SKILLS_ROOT` to install them elsewhere.
 
 ### Auth
 
@@ -92,19 +92,29 @@ tailscale serve --https=8443 off     # afterwards
 ssh -L 8085:localhost:8085 <host>
 ```
 
-## Install the agent skill (Hermes, OpenClaw, other agents)
+## Install the agent skills (Hermes, OpenClaw, other agents)
 
-The skills are the folders under `skills/` in this repo — any agent that reads a skills directory can use it. There's no registry or public-library step; install it straight from your clone:
+The skills are the folders under `skills/`: `fiken` for the CLI, `fiken-superforing` for
+browser bank matching. Placement is delegated to the [`skills`](https://skills.sh/) CLI, so
+one command covers every agent it knows.
 
-- **Claude Code** (default → `~/.claude/skills/fiken/`):
+- **From GitHub**, no clone needed:
+  ```bash
+  npx skills add nytafar/fiken-cli --skill '*' --agent claude-code --global
+  ```
+  Swap `--agent` for `'*'` to install everywhere, and use `skills update` / `skills remove`
+  later. `npx skills add nytafar/fiken-cli -l` lists what the repo offers.
+- **From a clone**, alongside the binary:
   ```bash
   ./install.sh                      # or: FIKEN_SKILL_ONLY=1 ./install.sh
+  FIKEN_SKILL_AGENTS='*' ./install.sh   # every agent instead of Claude Code
   ```
-- **Any other agent (Hermes, OpenClaw, …)** — point `FIKEN_SKILL_DIR` at that agent's skills directory:
+- **Working on the skills**, symlink them so edits in the clone are live:
   ```bash
-  FIKEN_SKILL_DIR=<agent-skills-dir>/fiken ./install.sh
+  FIKEN_SKILL_LINK=1 FIKEN_SKILL_ONLY=1 ./install.sh
   ```
-- **Multi-agent via the [`skills`](https://github.com/vercel-labs/skills) CLI** — run it against this repo/clone (not a public registry); see `npx skills install --help` for the exact source and `--agent` syntax.
+  The `skills` CLI copies into Claude Code's directory, so a plain install needs a rerun per
+  edit. `FIKEN_SKILLS_ROOT` moves the link (and the no-Node copy fallback) elsewhere.
 
 Restart the agent session or gateway if the skill isn't visible immediately.
 

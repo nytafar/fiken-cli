@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 #
-# Standalone installer for fiken-cli + the `fiken` agent skill.
+# Standalone installer for fiken-cli + the agent skills under skills/.
 # No Printing Press required — just the Go toolchain.
 #
-#   ./install.sh                  # install fiken-cli + the agent skill
+#   ./install.sh                  # install fiken-cli + the agent skills
 #   FIKEN_WITH_MCP=1 ./install.sh # also install the fiken-mcp server
-#   FIKEN_SKILL_ONLY=1 ./install.sh   # only (re)install the agent skill
-#   FIKEN_SKILL_DIR=/path ./install.sh   # install the skill elsewhere
+#   FIKEN_SKILL_ONLY=1 ./install.sh   # only (re)install the agent skills
+#   FIKEN_SKILL_AGENTS='*' ./install.sh   # install to every agent npx skills knows
+#   FIKEN_SKILL_LINK=1 ./install.sh   # symlink the skills to this clone (development)
+#   FIKEN_SKILLS_ROOT=/path ./install.sh  # target for the link/copy fallbacks
 #
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -31,14 +33,33 @@ if [ "$SKILL_ONLY" != "1" ]; then
   esac
 fi
 
-# Install the agent skill (Claude Code + any agent that reads ~/.claude/skills).
+# Install the agent skills under skills/. `npx skills` owns the placement: it
+# discovers every skill in this tree, symlinks them into each agent's directory
+# (so edits in this clone are live), and can update or remove them later.
+SKILL_AGENTS="${FIKEN_SKILL_AGENTS:-claude-code}"
 SKILLS_ROOT="${FIKEN_SKILLS_ROOT:-$HOME/.claude/skills}"
-for skill in "$ROOT"/skills/*/; do
-  name="$(basename "$skill")"
-  mkdir -p "$SKILLS_ROOT/$name"
-  cp -R "$skill". "$SKILLS_ROOT/$name/"
-  echo "Installed agent skill to: $SKILLS_ROOT/$name/"
-done
+if [ "${FIKEN_SKILL_LINK:-0}" = "1" ]; then
+  # Development: point the agent at this clone so edits are live. `npx skills`
+  # copies into Claude Code's directory, which would need a reinstall per edit.
+  for skill in "$ROOT"/skills/*/; do
+    name="$(basename "$skill")"
+    rm -rf "${SKILLS_ROOT:?}/$name"
+    mkdir -p "$SKILLS_ROOT"
+    ln -s "${skill%/}" "$SKILLS_ROOT/$name"
+    echo "Linked agent skill: $SKILLS_ROOT/$name -> ${skill%/}"
+  done
+elif command -v npx >/dev/null 2>&1; then
+  npx --yes skills add "$ROOT" --skill '*' --agent "$SKILL_AGENTS" --global --yes
+else
+  # No Node: copy into Claude Code's skills directory so the install still works.
+  echo "npx not found — copying skills to $SKILLS_ROOT (install Node for 'skills update')."
+  for skill in "$ROOT"/skills/*/; do
+    name="$(basename "$skill")"
+    mkdir -p "$SKILLS_ROOT/$name"
+    cp -R "$skill". "$SKILLS_ROOT/$name/"
+    echo "Installed agent skill to: $SKILLS_ROOT/$name/"
+  done
+fi
 
 echo ""
 echo "Done."
