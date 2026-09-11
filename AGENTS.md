@@ -69,3 +69,17 @@ against it. Live mode is switched by an untracked env file (`.env.local` or
 it is `internal/client/write_guard.go` (see it once Phase 1 lands) plus the transport in
 `internal/client/fiken_transport.go`. A binary that has not wired the guard's resolver
 denies every mutating request.
+
+## Agent skills
+
+### Issue tracker
+
+Issues live as GitHub issues in `nytafar/fiken-cli`, managed with the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical triage roles, each label string equal to its name. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: one `CONTEXT.md` plus `docs/adr/` at the repo root. See `docs/agents/domain.md`.

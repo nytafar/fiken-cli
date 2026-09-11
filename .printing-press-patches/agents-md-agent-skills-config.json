@@ -1,0 +1,22 @@
+{
+  "schema_version": 2,
+  "id": "agents-md-agent-skills-config",
+  "applied_at": "2026-09-11",
+  "base_run_id": "20260609-145046",
+  "base_printing_press_version": "4.24.0",
+  "summary": "docs(agents): record the engineering-skill config (issue tracker, triage labels, domain docs)",
+  "reason": "The Matt Pocock engineering skills (to-tickets, triage, to-spec, wayfinder, domain-modeling) read per-repo configuration from docs/agents/*.md and are pointed there by an '## Agent skills' section in AGENTS.md. Without it those skills have no idea that issues live in GitHub Issues for nytafar/fiken-cli, which label strings to apply, or where domain docs sit. The section is additive and sits after the generated content.",
+  "files": [
+    "AGENTS.md",
+    "docs/agents/issue-tracker.md",
+    "docs/agents/triage-labels.md",
+    "docs/agents/domain.md"
+  ],
+  "call_sites": [
+    "## Agent skills",
+    "See `docs/agents/issue-tracker.md`.",
+    "See `docs/agents/triage-labels.md`.",
+    "See `docs/agents/domain.md`."
+  ],
+  "validated_outcome": "Documentation only; no code paths touched. Verified the three docs/agents files exist and that AGENTS.md carries exactly one '## Agent skills' section."
+}
