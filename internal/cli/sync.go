@@ -2262,11 +2262,11 @@ var resourceIDFieldOverrides = map[string]string{
 	"bank_accounts": "bankAccountId",
 	"companies":     "slug",
 	"contacts":      "contactId",
-	// PATCH(sync-invoices-creditnotes): invoiceResult requires invoiceId
-	// (spec.yaml:5244) and creditNoteResult requires creditNoteId
-	// (spec.yaml:4930); neither name is in genericIDFieldFallbacks, so without
-	// these two entries every row of the new resources is an extract failure
-	// (issue #18).
+	// PATCH(sync-invoices-creditnotes): invoiceResult (spec.yaml:5759) carries
+	// invoiceId as a plain readOnly property (:5762, no required block) and
+	// creditNoteResult requires creditNoteId (spec.yaml:4930); neither name is
+	// in genericIDFieldFallbacks, so without these two entries every row of the
+	// new resources is an extract failure (issue #18).
 	"credit_notes": "creditNoteId",
 	"invoices":     "invoiceId",
 	// PATCH(mirror-id-keys-accounts-inbox): key on documentId, the path id of

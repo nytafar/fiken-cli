@@ -16,14 +16,24 @@
 // on the way in, before the upsert, rather than at each read site: one place
 // that cannot be forgotten by the next report.
 //
-// KEY ORDER is uuid, then identifier, then downloadUrl. uuid is what the live
-// payload identifies an attachment by, but it is undocumented — spec.yaml's
-// attachment schema (~4556) carries only identifier, downloadUrl, comment and
-// type — so a payload without it must still dedupe. An entry carrying none of
-// the three is KEPT AS IS, every time: with no identity there is no evidence
-// two such entries are the same document, and dropping one would be data loss
-// to fix a cosmetic count. First occurrence wins and the order is preserved,
-// so the blob a reader sees is the API's own order minus the repeats.
+// KEY ORDER is uuid, then downloadUrl, then the canonical bytes of the whole
+// entry. uuid is what the live payload identifies an attachment by, but it is
+// undocumented — spec.yaml's attachment schema (~4556) carries only
+// identifier, downloadUrl, comment and type — so a payload without it must
+// still dedupe, and downloadUrl is the only documented value that is per file.
+//
+// identifier is NOT a key at any position. spec.yaml:4559-4562 documents it as
+// a USER-DEFINED label ("Could be the Invoice Id or receipt number for
+// example") and no upload endpoint sets it per file, so an invoice PDF and a
+// reminder PDF on the same sale routinely carry the same identifier; keying on
+// it would delete one of two real documents.
+//
+// The last resort is the entry's canonical JSON — key order and whitespace
+// normalised — because a byte-identical pair is exactly what issue #10
+// reports, and two entries equal field for field carry no evidence of being
+// two documents. An entry that is not JSON at all is KEPT AS IS. First
+// occurrence wins and the order is preserved, so the blob a reader sees is the
+// API's own order minus the repeats.
 package cli
 
 import (
@@ -32,8 +42,11 @@ import (
 	"fiken-cli/internal/store"
 )
 
-// attachmentDedupeKeys is the identity fallback chain, in priority order.
-var attachmentDedupeKeys = []string{"uuid", "identifier", "downloadUrl"}
+// attachmentDedupeKeys is the per-file identity chain, in priority order.
+// identifier is deliberately absent — it is a user-defined label, not a file
+// key (spec.yaml:4559-4562) — and the canonical-bytes fallback below is what
+// catches an entry carrying neither of these.
+var attachmentDedupeKeys = []string{"uuid", "downloadUrl"}
 
 // dedupeAttachmentArrays returns items with the parent document's attachment
 // array collapsed to one entry per distinct attachment. Only the three
@@ -92,8 +105,10 @@ func dedupeAttachmentsIn(item json.RawMessage, field string) (json.RawMessage, b
 	for _, entry := range entries {
 		key, ok := attachmentIdentity(entry)
 		if !ok {
-			// No identity: keep it. Two anonymous entries are not evidence of
-			// one document.
+			// Nothing to compare on: keep it. Unreachable for an element of an
+			// array json.Unmarshal accepted — a guard, not a case — and the
+			// only safe direction if it ever is reached, since dropping an
+			// entry would be data loss to fix a cosmetic count.
 			kept = append(kept, entry)
 			continue
 		}
@@ -119,25 +134,45 @@ func dedupeAttachmentsIn(item json.RawMessage, field string) (json.RawMessage, b
 	return rewritten, true
 }
 
-// attachmentIdentity returns the first non-empty identity field an attachment
-// carries, namespaced by the field it came from so an identifier that happens
-// to equal another entry's uuid cannot collapse the two. ok=false means the
-// entry has no identity at all.
+// attachmentIdentity returns the identity an attachment is deduped on: the
+// first non-empty per-file key it carries, namespaced by the field the value
+// came from so a downloadUrl that happens to equal another entry's uuid cannot
+// collapse the two, and otherwise the entry's canonical bytes. ok=false means
+// the entry is not JSON at all and has to be kept as is — which an element of
+// an array json.Unmarshal already accepted never is.
 func attachmentIdentity(entry json.RawMessage) (string, bool) {
 	var obj map[string]json.RawMessage
-	if err := json.Unmarshal(entry, &obj); err != nil {
+	if err := json.Unmarshal(entry, &obj); err == nil {
+		for _, key := range attachmentDedupeKeys {
+			raw, ok := obj[key]
+			if !ok {
+				continue
+			}
+			var value string
+			if err := json.Unmarshal(raw, &value); err != nil || value == "" {
+				continue
+			}
+			return key + "\x00" + value, true
+		}
+	}
+	canonical, ok := canonicalAttachmentBytes(entry)
+	if !ok {
 		return "", false
 	}
-	for _, key := range attachmentDedupeKeys {
-		raw, ok := obj[key]
-		if !ok {
-			continue
-		}
-		var value string
-		if err := json.Unmarshal(raw, &value); err != nil || value == "" {
-			continue
-		}
-		return key + "\x00" + value, true
+	return "bytes\x00" + canonical, true
+}
+
+// canonicalAttachmentBytes renders an entry independently of key order and
+// whitespace, so two entries the API serialised differently still compare
+// equal. ok=false for bytes that are not JSON at all.
+func canonicalAttachmentBytes(entry json.RawMessage) (string, bool) {
+	var value any
+	if err := json.Unmarshal(entry, &value); err != nil {
+		return "", false
 	}
-	return "", false
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return "", false
+	}
+	return string(encoded), true
 }

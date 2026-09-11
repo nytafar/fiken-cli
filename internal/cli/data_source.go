@@ -372,7 +372,12 @@ func writeThroughCache(ctx context.Context, resourceType string, companySlug str
 					}
 				}
 				if !looksLikeListEnvelope {
-					_, _, _ = db.UpsertBatch(resourceType, mirrorWithParentID([]json.RawMessage{data}, companySlug))
+					// PATCH(attachment-dedupe): write-through stores the same
+					// blob sync does, so it has to drop the API's duplicate
+					// attachment entries too — otherwise a `sales get` on the
+					// default auto data source rewrites the cleaned row with
+					// the duplicate pair (issue #10).
+					_, _, _ = db.UpsertBatch(resourceType, dedupeAttachmentArrays(resourceType, mirrorWithParentID([]json.RawMessage{data}, companySlug)))
 					return
 				}
 			}
@@ -380,7 +385,10 @@ func writeThroughCache(ctx context.Context, resourceType string, companySlug str
 	}
 
 	if len(items) > 0 {
-		_, _, _ = db.UpsertBatch(resourceType, mirrorWithParentID(items, companySlug))
+		// PATCH(attachment-dedupe): same reason as the single-object branch
+		// above — a `sales list` served through write-through must store the
+		// cleaned array (issue #10).
+		_, _, _ = db.UpsertBatch(resourceType, dedupeAttachmentArrays(resourceType, mirrorWithParentID(items, companySlug)))
 	}
 }
 
@@ -517,7 +525,10 @@ func writeMutationResponseToStore(ctx context.Context, resourceType string, data
 	}
 	defer db.Close()
 
-	_, _, _ = db.UpsertBatch(resourceType, mirrorWithParentID(items, mirrorCompanySlugFromPath(requestPath)))
+	// PATCH(attachment-dedupe): a mutation response carries the same duplicated
+	// attachment array a read does, and lands in the same mirror row, so it is
+	// cleaned on the same terms (issue #10).
+	_, _, _ = db.UpsertBatch(resourceType, dedupeAttachmentArrays(resourceType, mirrorWithParentID(items, mirrorCompanySlugFromPath(requestPath))))
 }
 
 func mutationResponseEntityItems(resourceType string, data json.RawMessage, responsePath string) []json.RawMessage {
