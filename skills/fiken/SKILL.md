@@ -16,21 +16,15 @@ metadata:
 
 ## Prerequisites: Install the CLI
 
-This skill drives the `fiken-cli` binary. **You must verify the CLI is installed before invoking any command from this skill.** If it is missing, install it from source:
+This skill drives the `fiken-cli` binary. **You must verify the CLI is installed before invoking any command from this skill.** If it is missing, install the latest release:
 
 ```bash
-# From a clone of this repo:
-make install          # go install ./cmd/fiken-cli  -> $GOPATH/bin (usually on PATH)
-make install-mcp      # optional: the MCP server (fiken-mcp)
-
-# Or one-shot installer (binary + this skill):
-./install.sh
-
-# Or directly with the Go toolchain:
-go install ./cmd/fiken-cli
+curl -fsSL https://raw.githubusercontent.com/nytafar/fiken-cli/main/install.sh | bash
+# add:  bash -s -- --with-mcp   for the MCP server, or  --from-source  inside a clone (needs Go)
 ```
 
-Verify: `fiken-cli --version`. If it reports "command not found", `$(go env GOPATH)/bin` is not on `$PATH` — add it. Do not proceed with skill commands until verification succeeds.
+The installer verifies the release checksum and puts `fiken-cli` in `~/.local/bin`.
+Verify: `fiken-cli --version`. If it reports "command not found", `~/.local/bin` is not on `$PATH` — add it. Do not proceed with skill commands until verification succeeds.
 
 Every Fiken read endpoint as a composable command with offline FTS and a local mirror agents can query with SQL. On top of that, an error-hunting and reconciliation surface — bank-unverified, drift, vat-anomaly, mva-summary, rollup — and a heavily gated write path (prepare, validate, commit, reverse) that is idempotent, date-aligned to the bank line, and fully audited in an append-only log. Existing Fiken tools are read-only or abandoned; none reconcile, none write safely.
 
@@ -519,7 +513,7 @@ Parse `$ARGUMENTS`:
 
 ## MCP Server Installation
 
-Install the MCP binary from this repo (`FIKEN_WITH_MCP=1 ./install.sh`, or `make install-mcp`), then register it:
+Install the MCP binary (`curl -fsSL https://raw.githubusercontent.com/nytafar/fiken-cli/main/install.sh | bash -s -- --with-mcp`, or `make install-mcp` from a clone), then register it:
 
 ```bash
 claude mcp add fiken-mcp -- fiken-mcp

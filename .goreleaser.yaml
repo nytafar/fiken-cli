@@ -33,6 +33,7 @@ archives:
     files:
       - README.md
       - LICENSE
+      - docs/*.md
       - skills/**
 
 checksum:

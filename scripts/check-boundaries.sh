@@ -154,7 +154,7 @@ fi
 #     Negated mentions ("... is not checked") and `validate`'s legitimate
 #     "balanced debit/credit" wording are excluded on purpose.
 # ---------------------------------------------------------------------------
-DOC_FILES=(.printing-press.json skills/fiken/SKILL.md README.md internal/mcp/tools.go)
+DOC_FILES=(.printing-press.json skills/fiken/SKILL.md README.md docs/features.md docs/design.md docs/commands.md internal/mcp/tools.go)
 doc_bad=()
 while IFS= read -r hit; do
 	[ -n "$hit" ] && doc_bad+=("$hit")
