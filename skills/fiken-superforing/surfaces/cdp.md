@@ -13,6 +13,8 @@ then rerun. Exit 5 means no Chromium on the port.
 S=~/.claude/skills/fiken-superforing/scripts/superforing.mjs
 node $S list    --fra 2026-05-01 --til 2026-06-30            # TSV: id dato linjeBelop besteBelop linjetype tittel tekst docs knyttet
 node $S buttons 12094587982 12094587983 --fra … --til …      # one line per id: "id<TAB>btn / btn / btn"
+node $S show    13740949433 --fra … --til … --chars 420      # buttons plus the suggestion text; run on every row before deciding
+node $S confirm 13672073478 --label "Bekreft dato" --fra … --til … --log   # Vipps-oppgjør
 node $S confirm 12046895329 12046895333 --fra … --til … --log --correlation-id <run>
 ```
 

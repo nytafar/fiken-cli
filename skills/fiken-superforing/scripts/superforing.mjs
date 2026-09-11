@@ -5,6 +5,7 @@
 //
 //   superforing.mjs list      --slug nyta --account 170218093 --fra 2026-05-01 --til 2026-06-30
 //   superforing.mjs buttons   <linjeId>... [same filters]
+//   superforing.mjs show      <linjeId>... [--chars 600]   buttons plus the suggestion text of the open row
 //   superforing.mjs confirm   <linjeId>... [--label "OK, gå til neste"] [--log] [--correlation-id X]
 //   superforing.mjs open      [filters]            navigate only
 //
@@ -24,7 +25,7 @@ for (let i = 0; i < argv.length; i++) {
 }
 const need = (k, d) => opts[k] ?? d ?? die(2, `missing --${k}`);
 function die(code, msg) { console.error(msg); process.exit(code); }
-if (!['list', 'buttons', 'confirm', 'open'].includes(cmd)) die(2, 'usage: superforing.mjs list|buttons|confirm|open [ids...] [--slug --account --fra --til ...]');
+if (!['list', 'buttons', 'show', 'confirm', 'open'].includes(cmd)) die(2, 'usage: superforing.mjs list|buttons|show|confirm|open [ids...] [--slug --account --fra --til ...]');
 
 const port = opts.port ?? '9222';
 const slug = need('slug', 'nyta');
@@ -121,6 +122,13 @@ if (cmd === 'open') {
   for (const id of pos) {
     const b = await cdp.eval(wrap(`return await buttons(${Number(id)});`));
     console.log(`${id}\t${b ? b.join(' / ') : '<missing>'}`);
+  }
+} else if (cmd === 'show') {
+  if (!pos.length) die(2, 'show needs at least one linje id');
+  const chars = Number(opts.chars ?? 600);
+  for (const id of pos) {
+    const r = await cdp.eval(wrap(`const b = await buttons(${Number(id)}); if (!b) return null; const d = byId(${Number(id)}).closest('details'); return { b, text: norm(d.innerText).slice(0, ${chars}) };`));
+    console.log(`== ${id}\t${r ? r.b.join(' / ') : '<missing>'}\n${r ? r.text : ''}`);
   }
 } else if (cmd === 'confirm') {
   if (!pos.length) die(2, 'confirm needs at least one linje id');
