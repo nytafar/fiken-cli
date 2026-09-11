@@ -6,7 +6,17 @@ for card lines in currency the receipt amount is `besteBelop`. Card subscription
 **previous** period, so the receipt is often dated up to a month before the line: a 4 May
 charge pays the 30 April invoice.
 
-Without a receipt, park the line with reason `mangler bilag`.
+Public fees and interest (`Forsinkelsesrenter`, Skatteetaten) come without a document.
+Book them from precedent: search the mirror
+(`sqlite3 ~/.local/share/fiken-cli/data.db` on `journal_entries` JSON, `description like
+'%forsinkelse%'`, same company) and reuse its account and contact, no attachment. Nyta:
+supplier purchase on `8159`, `vatType NONE`, contact Skatteetaten (supplier 20087).
+
+Without a receipt, park the line with reason `mangler bilag`, unless the charge is a
+**recurring card subscription** already booked in earlier months: then follow the earlier
+bookings (`purchases get --all` over the past year, same amount and description), attach the
+first receipt as reference, and generate an internal voucher per month
+([`abonnement-internt-bilag.md`](abonnement-internt-bilag.md)).
 
 1. **Read the receipt.** Download it (`documentUrl` with the `access_token` from
    `~/.config/fiken-cli/config.toml` as a Bearer token, CLI download is nytafar/fiken-cli#23) into

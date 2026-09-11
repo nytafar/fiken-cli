@@ -23,7 +23,8 @@ node $S confirm 12046895329 12046895333 --fra … --til … --log --correlation-
 - `--slug` and `--account` default to `nyta` and `170218093`; `--sok`, `--kun-innbetalinger`,
   `--side` map to the URL filters in [`../reference/superforing-dom.md`](../reference/superforing-dom.md).
 - `eval '<js>'` runs page JS with the primitives in scope, for states the commands do not cover.
-- `list` prints every open row on the page in one go: no truncation, no paging.
+- `list` prints every open row on the page in one go: no truncation, no paging. `--all` drops
+  the `nf` filter to include finished lines.
 - `confirm` clicks `OK, gå til neste` (or `--label`) per id and prints `OK` or `NO` with the
   buttons present. With `--log` it also writes `match.confirmed` through `fiken-cli log-event`.
   Exit 4 if any row did not confirm; the rows that did are still confirmed and logged.

@@ -11,7 +11,7 @@
 //   superforing.mjs open      [filters]            navigate only
 //   superforing.mjs eval      '<js body>'         run page JS with the primitives in scope; `return` a value
 //
-// Filters: --fra --til --sok --kun-innbetalinger true|false --side N. --port (default 9222).
+// Filters: --fra --til --sok --kun-innbetalinger true|false --side N --all (include finished lines). --port (default 9222).
 // Output is TSV on stdout, one row per line. Exit codes: 0 ok, 2 usage, 3 signed out,
 // 4 a confirm did not go through (see rows), 5 CDP unreachable.
 
@@ -32,7 +32,7 @@ if (!['list', 'buttons', 'show', 'confirm', 'open', 'eval'].includes(cmd)) die(2
 const port = opts.port ?? '9222';
 const slug = need('slug', 'nyta');
 const account = need('account', '170218093');
-const q = ['b', 'nf'];
+const q = opts.all ? ['b'] : ['b', 'nf'];
 if (opts.fra) q.push(`fra=${opts.fra}`);
 if (opts.til) q.push(`til=${opts.til}`);
 if (opts.sok) q.push(`sok=${encodeURIComponent(opts.sok)}`);
@@ -95,6 +95,7 @@ const wrap = body => `(async () => { ${PRIM} ${body} })()`;
 
 async function ready(cdp) {
   for (let i = 0; i < 60; i++) {
+    if (i === 16) { const done = await cdp.eval("document.readyState === 'complete' && !document.querySelector('.ladda-spinner, .spinner, [class*=loading]')"); if (done) return { rows: 0, empty: true }; }
     const s = await cdp.eval(`({ title: document.title, rows: document.querySelectorAll('fk-collapse-title').length, empty: /tomt|ingen (linjer|transaksjoner)/i.test(document.body?.innerText ?? '') })`);
     if (/logg inn/i.test(s.title)) die(3, 'Fiken is signed out. Sign in in the Chromium window, then rerun.');
     if (s.rows > 0 || s.empty) return s;
