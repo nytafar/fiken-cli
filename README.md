@@ -67,7 +67,7 @@ Verify with `fiken-cli --version`. If it's not found, add `$(go env GOPATH)/bin`
 
 ### Agent skill
 
-`./install.sh` copies `SKILL.md` to `~/.claude/skills/fiken/SKILL.md`, so Claude Code (and any agent that reads `~/.claude/skills/`) triggers it on Fiken requests — bankavstemming, unmatched bank transactions, rounding errors, mis-coded VAT, MVA summaries, etc. Set `FIKEN_SKILL_DIR` to install it elsewhere.
+`./install.sh` copies every skill under `skills/` into `~/.claude/skills/` (`fiken` for the CLI, `fiken-superforing` for browser bank matching), so Claude Code (and any agent that reads `~/.claude/skills/`) triggers it on Fiken requests — bankavstemming, unmatched bank transactions, rounding errors, mis-coded VAT, MVA summaries, etc. Set `FIKEN_SKILLS_ROOT` to install them elsewhere.
 
 ### Auth
 
@@ -94,7 +94,7 @@ ssh -L 8085:localhost:8085 <host>
 
 ## Install the agent skill (Hermes, OpenClaw, other agents)
 
-The skill is just `SKILL.md` in this repo — any agent that reads a skills directory can use it. There's no registry or public-library step; install it straight from your clone:
+The skills are the folders under `skills/` in this repo — any agent that reads a skills directory can use it. There's no registry or public-library step; install it straight from your clone:
 
 - **Claude Code** (default → `~/.claude/skills/fiken/`):
   ```bash

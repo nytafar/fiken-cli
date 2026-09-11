@@ -32,10 +32,13 @@ if [ "$SKILL_ONLY" != "1" ]; then
 fi
 
 # Install the agent skill (Claude Code + any agent that reads ~/.claude/skills).
-SKILL_DIR="${FIKEN_SKILL_DIR:-$HOME/.claude/skills/fiken}"
-mkdir -p "$SKILL_DIR"
-cp "$ROOT/SKILL.md" "$SKILL_DIR/SKILL.md"
-echo "Installed agent skill to: $SKILL_DIR/SKILL.md"
+SKILLS_ROOT="${FIKEN_SKILLS_ROOT:-$HOME/.claude/skills}"
+for skill in "$ROOT"/skills/*/; do
+  name="$(basename "$skill")"
+  mkdir -p "$SKILLS_ROOT/$name"
+  cp -R "$skill". "$SKILLS_ROOT/$name/"
+  echo "Installed agent skill to: $SKILLS_ROOT/$name/"
+done
 
 echo ""
 echo "Done."

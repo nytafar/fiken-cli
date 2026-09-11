@@ -33,7 +33,7 @@ fiken-cli <command> --dry-run --agent
 
 Use `--yes --no-input` only after the target, arguments, and side effects are clear.
 
-For install, auth, examples, and longer product guidance, read `README.md` and `SKILL.md`. This file intentionally stays small so repo-local agents get invariant local guidance without duplicating the generated docs.
+For install, auth, examples, and longer product guidance, read `README.md` and `skills/fiken/SKILL.md`. This file intentionally stays small so repo-local agents get invariant local guidance without duplicating the generated docs.
 
 ## Release Ledger
 

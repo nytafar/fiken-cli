@@ -36,6 +36,6 @@ grep -rIl --exclude-dir=.git -e 'fiken-pp-cli' -e 'fiken-pp-mcp' . 2>/dev/null |
 done
 
 # 3. SKILL.md H1 title, if PP reinjected the "— Printing Press CLI" suffix.
-[ -f SKILL.md ] && perl -pi -e 's/^# Fiken — Printing Press CLI\s*$/# Fiken CLI\n/' SKILL.md || true
+[ -f skills/fiken/SKILL.md ] && perl -pi -e 's/^# Fiken — Printing Press CLI\s*$/# Fiken CLI\n/' skills/fiken/SKILL.md || true
 
 echo "harmonized -> fiken-cli. Now: go build ./... && go test ./..."
