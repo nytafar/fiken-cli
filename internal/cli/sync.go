@@ -356,7 +356,12 @@ Resource scoping:
 					// always an access denial — parent_table_empty and
 					// company_not_in_parent_table warn too — so the message points
 					// at the events that carry the reason instead of naming one
-					// cause for all of them (issue #14).
+					// cause for all of them (issue #14). Under --human-friendly the
+					// warn producers write prose to stderr and emit no events, so
+					// the message points at what that mode actually produced.
+					if humanFriendly {
+						return fmt.Errorf("%d resource(s) skipped without error; see the warnings above for the reasons", warnCount)
+					}
 					return fmt.Errorf("%d resource(s) skipped without error; see the sync_warning events for the reasons", warnCount)
 				}
 				if errCount > 0 {
@@ -1784,7 +1789,7 @@ func syncDependentResource(ctx context.Context, c interface {
 	// parents this run walked, and whether every one of them reported it.
 	depResultCountTotal := 0
 	depParentsWithResultCount := 0
-	depParentsDeniedWithoutPage := 0
+	depParentsDeniedAndEmpty := 0
 	depWalkTruncated := false
 	// PATCH(pagination-headers): distinct storage keys landed for the parent
 	// being walked, and whether this pull carried an incremental window.
@@ -1862,9 +1867,18 @@ func syncDependentResource(ctx context.Context, c interface {
 				// collection total, so it is walked-with-zero rather than a
 				// truncated walk. One 403 company (a Fiken book without the API
 				// module) otherwise blocked the recorded result_count for every
-				// dependent resource of the whole mirror (issue #15).
+				// dependent resource of the whole mirror (issue #15). The zero
+				// only matches what total_count counts for that company while
+				// the mirror holds no rows for it; a company whose API module
+				// lapsed after an earlier sync still has rows, and counting it
+				// as zero would record a total short by exactly those rows.
+				// Such a parent is neither counted nor treated as truncation:
+				// it simply leaves this run unable to account for every parent,
+				// so nothing is recorded.
 				if parentAccessDenied && pagesFetched == 0 {
-					depParentsDeniedWithoutPage++
+					if deniedParentIsAccountedFor(db, dep.Name, parentID) {
+						depParentsDeniedAndEmpty++
+					}
 				} else {
 					parentTruncated = true
 				}
@@ -2042,9 +2056,9 @@ func syncDependentResource(ctx context.Context, c interface {
 	_ = db.SaveSyncState(dep.Name, "", syncStateTotalCount(db, dep.Name, totalCount))
 	// PATCH(pagination-headers): only a run that walked every parent to the end,
 	// with each one either carrying the header or denying access before serving
-	// a page, produces a number on the same scale as total_count, which is
-	// mirror-wide (issue #15).
-	recordSyncResultCount(db, dep.Name, depResultCountTotal, shouldRecordResultCount(everyParentAccountedFor(depParentsWithResultCount, depParentsDeniedWithoutPage, len(parentRows)), depWalkTruncated, depWindowedPull))
+	// a page while holding no rows in the mirror, produces a number on the same
+	// scale as total_count, which is mirror-wide (issue #15).
+	recordSyncResultCount(db, dep.Name, depResultCountTotal, shouldRecordResultCount(everyParentAccountedFor(depParentsWithResultCount, depParentsDeniedAndEmpty, len(parentRows)), depWalkTruncated, depWindowedPull))
 
 	// F4b symptom probe: items consumed and extracted but nothing landed.
 	// See syncResource for rationale.

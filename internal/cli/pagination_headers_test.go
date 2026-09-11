@@ -796,3 +796,106 @@ func TestSyncDependentResource_AccessDeniedParentDoesNotBlockRecording(t *testin
 		t.Fatalf("the 403 parent was not reported\n%s", events.String())
 	}
 }
+
+// TestSyncDependentResource_DeniedParentWithMirrorRowsBlocksRecording is the
+// other half of the denied-parent rule (issue #15 review). The recorded number
+// is compared against sync_state.total_count, which counts EVERY company's rows
+// including the ones an earlier sync landed for a company whose API module has
+// since lapsed. Counting such a parent as "accounted for with zero" would
+// rewrite the recorded total down by exactly the rows still sitting in the
+// mirror, and doctor would report rows N / result_count N-minus-those forever.
+// So a denied parent that still holds rows blocks recording for this run, and
+// the previously recorded value survives untouched.
+func TestSyncDependentResource_DeniedParentWithMirrorRowsBlocksRecording(t *testing.T) {
+	srv := httptest.NewServer(&deniedParentServer{
+		deniedSlug: "denied-co",
+		rows:       []string{`{"code":"1500","name":"Account A"}`, `{"code":"1501","name":"Account B"}`},
+	})
+	t.Cleanup(srv.Close)
+	c := client.New(&config.Config{BaseURL: srv.URL, AccessToken: "test-token"}, 10*time.Second, 0)
+	c.NoCache = true
+
+	db := openTestStore(t)
+	if _, _, err := db.UpsertBatch("companies", []json.RawMessage{
+		json.RawMessage(`{"slug":"denied-co","name":"Lapsed API Module"}`),
+		json.RawMessage(`{"slug":"good-co","name":"Complete Book"}`),
+	}); err != nil {
+		t.Fatalf("seed companies: %v", err)
+	}
+	// What an earlier sync landed for the company that now denies access.
+	if _, _, err := db.UpsertBatch("accounts", []json.RawMessage{
+		json.RawMessage(`{"code":"3000","name":"Old Account","parent_id":"denied-co"}`),
+		json.RawMessage(`{"code":"3001","name":"Older Account","parent_id":"denied-co"}`),
+	}); err != nil {
+		t.Fatalf("seed denied parent's rows: %v", err)
+	}
+	if rows, err := db.CountCompanyResources("accounts", "denied-co"); err != nil || rows != 2 {
+		t.Fatalf("seeded rows for denied-co = (%d, %v), want (2, nil)", rows, err)
+	}
+	// What the last run that could see every book recorded.
+	if err := db.SaveSyncResultCount("accounts", 4); err != nil {
+		t.Fatalf("seed recorded result count: %v", err)
+	}
+
+	dep := dependentResourceDef{
+		Name:          "accounts",
+		ParentTable:   "companies",
+		ParentIDParam: "companySlug",
+		PathTemplate:  "/companies/{companySlug}/accounts",
+		KeyField:      "slug",
+		PathParams:    []dependentPathParamDef{{Param: "companySlug", Field: "slug"}},
+	}
+	var events bytes.Buffer
+	if res := syncDependentResource(context.Background(), c, db, dep, "", true, 0, false, nil, &events); res.Err != nil {
+		t.Fatalf("syncDependentResource: %v", res.Err)
+	}
+	if got, ok := db.SyncResultCount("accounts"); !ok || got != 4 {
+		t.Fatalf("recorded result count = (%d, %v), want (4, true): a denied parent that still holds rows must not let the run overwrite it\n%s", got, ok, events.String())
+	}
+}
+
+// allDeniedServer answers every dependent request with 403, the shape of a run
+// whose only books have no API module activated.
+type allDeniedServer struct{}
+
+func (allDeniedServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusForbidden)
+	_, _ = io.WriteString(w, `{"message":"API module not activated"}`)
+}
+
+// TestSyncDependentResource_AllParentsDeniedRecordsNothing: with no parent
+// serving a header the sum is a literal 0, which SyncResultCount and doctor
+// report as "the API says this collection is empty". Nobody answered, so
+// nothing is recorded and result_count stays NULL.
+func TestSyncDependentResource_AllParentsDeniedRecordsNothing(t *testing.T) {
+	srv := httptest.NewServer(allDeniedServer{})
+	t.Cleanup(srv.Close)
+	c := client.New(&config.Config{BaseURL: srv.URL, AccessToken: "test-token"}, 10*time.Second, 0)
+	c.NoCache = true
+
+	db := openTestStore(t)
+	if _, _, err := db.UpsertBatch("companies", []json.RawMessage{
+		json.RawMessage(`{"slug":"denied-one","name":"No API Module"}`),
+		json.RawMessage(`{"slug":"denied-two","name":"No API Module Either"}`),
+	}); err != nil {
+		t.Fatalf("seed companies: %v", err)
+	}
+
+	dep := dependentResourceDef{
+		Name:          "accounts",
+		ParentTable:   "companies",
+		ParentIDParam: "companySlug",
+		PathTemplate:  "/companies/{companySlug}/accounts",
+		KeyField:      "slug",
+		PathParams:    []dependentPathParamDef{{Param: "companySlug", Field: "slug"}},
+	}
+	var events bytes.Buffer
+	res := syncDependentResource(context.Background(), c, db, dep, "", true, 0, false, nil, &events)
+	if res.Warn == nil {
+		t.Fatalf("an all-denied dependent walk must warn, got %+v\n%s", res, events.String())
+	}
+	if got, ok := db.SyncResultCount("accounts"); ok {
+		t.Fatalf("recorded result count = (%d, %v), want no recorded value: no parent served a result count\n%s", got, ok, events.String())
+	}
+}

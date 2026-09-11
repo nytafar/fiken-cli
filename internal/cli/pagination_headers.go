@@ -152,15 +152,47 @@ func syncPullIsWindowed(effectiveSince string, userParams *syncUserParams, resou
 // when every parent said what its own collection holds.
 //
 // A parent either returned a page carrying Fiken-Api-Result-Count, or it denied
-// access before serving one. A denied parent lands zero rows and adds zero to
-// the total, so demanding a header from it is demanding one that cannot exist:
-// a single Fiken book without the API module activated (403 on every dependent
-// endpoint) kept the whole mirror's dependent result counts at NULL, which is
-// the state the first full resync landed in. A parent that DID serve a page
-// without the header is different — the total is then genuinely short by an
-// unknown amount — and still blocks recording.
-func everyParentAccountedFor(parentsWithResultCount, parentsDeniedWithoutPage, parents int) bool {
-	return parentsWithResultCount+parentsDeniedWithoutPage == parents
+// access before serving one AND holds no rows in the mirror. A denied parent
+// lands zero rows this run and adds zero to the total, so demanding a header
+// from it is demanding one that cannot exist: a single Fiken book without the
+// API module activated (403 on every dependent endpoint) kept the whole
+// mirror's dependent result counts at NULL, which is the state the first full
+// resync landed in. But the recorded number is compared against
+// sync_state.total_count, which is db.CountResources — mirror-wide, including
+// the rows an EARLIER sync landed for the now-denied company. A company whose
+// API module lapses would otherwise quietly rewrite 800 to 500 while its 300
+// rows sit in the mirror, and doctor would report rows 800 / result_count 500
+// forever. So the zero a denied parent contributes is only honest while the
+// mirror also holds zero for it (deniedParentIsAccountedFor); otherwise this
+// run may not record at all. A parent that DID serve a page without the header
+// is different again — the total is then short by an unknown amount — and also
+// blocks recording.
+//
+// At least one parent must have served the header. Without that, an all-denied
+// resource would record a literal 0, which doctor and SyncResultCount report as
+// "the API says this collection is empty" rather than "nobody answered".
+func everyParentAccountedFor(parentsWithResultCount, parentsDeniedAndEmpty, parents int) bool {
+	if parentsWithResultCount == 0 {
+		return false
+	}
+	return parentsWithResultCount+parentsDeniedAndEmpty == parents
+}
+
+// deniedParentIsAccountedFor reports whether a parent that denied access before
+// serving a page may be counted as "walked, landed zero" for the recorded
+// result count: only when the mirror holds no rows of this resource for it, so
+// the zero it contributes to the sum matches what total_count counts for it.
+// A store error answers false — the conservative side is to keep the previously
+// recorded value rather than overwrite it from a run we cannot vouch for.
+func deniedParentIsAccountedFor(db *store.Store, resource, parent string) bool {
+	if db == nil || parent == "" {
+		return false
+	}
+	rows, err := db.CountCompanyResources(resource, parent)
+	if err != nil {
+		return false
+	}
+	return rows == 0
 }
 
 // recordSyncResultCount persists the API's own row count for a resource when

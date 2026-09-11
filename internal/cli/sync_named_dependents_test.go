@@ -358,3 +358,26 @@ func TestSync_CompanyNotInParentTableWarns(t *testing.T) {
 		}
 	}
 }
+
+// TestSync_AllWarnedExitMessageIsModeAware: the all-warned summary points at
+// "the sync_warning events" for the per-resource reason, but under
+// --human-friendly the warn producers write prose to stderr and emit no events
+// at all, so that message sent the reader looking for something that was never
+// written (issue #14 review). Human mode points at the warnings it printed.
+func TestSync_AllWarnedExitMessageIsModeAware(t *testing.T) {
+	env := newSyncTestEnv(t, 3)
+	t.Cleanup(func() { syncCompanyScope = "" })
+	humanFriendly = true
+	t.Cleanup(func() { humanFriendly = false })
+
+	err := env.run(t, "--resources", "journal_entries", "--company", "nosuchco")
+	if err == nil {
+		t.Fatalf("sync --company nosuchco returned nil, want the all-warned exit\n%s", env.out.String())
+	}
+	if strings.Contains(err.Error(), "sync_warning") {
+		t.Fatalf("human-mode all-warned exit = %q, but human mode emits no sync_warning events", err)
+	}
+	if !strings.Contains(err.Error(), "warnings above") {
+		t.Fatalf("human-mode all-warned exit = %q, want it to point at the warnings printed above", err)
+	}
+}
