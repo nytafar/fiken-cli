@@ -7,6 +7,11 @@ This file is maintained by printing-press-library release automation. Do not han
 ### Added
 
 - `inbox get-document --output <path>` downloads the file behind the document's `documentUrl` through the authenticated client instead of leaving the bearer token to be curled by hand: a file path writes that name, a directory (or a trailing `/`) writes the document's own filename, `-` streams to stdout, and `--dry-run` prints the request without fetching. `purchases attachments get-purchase` and `sales attachments get-sale` take the same flag and write every attachment into the directory given. `--agent`/JSON mode prints `{"path":…,"bytes":…,"filename":…}` for one file and `{"files":[…],"count":…,"bytes":…}` for several (#23).
+- A plain `sync` is now incremental: each (company, resource) pair keeps its own watermark in a new `sync_watermark` table, and a repeat run sends `lastModifiedGe` for contacts, journal_entries, transactions, products, sales, invoices and credit_notes, announcing each windowed pair with `{"event":"sync_window","company":...,"resource":...,"since":...}`. A pair that has never completed a pull, and every resource without a date filter, is still fetched in full. The watermark is the start of the run that filled it and is written only after a pull with no error and no row-count mismatch, so an interrupted run re-pulls rather than skips. `--since` stays a caller window and leaves the watermark untouched; `--full` ignores it, clears it for the pairs it refetches and writes it again from the full pull (#22).
+
+### Changed
+
+- Deletion detection (#17) now runs on a pair's first complete pull and on `sync --full`, not on every default run: an incremental pull asked for a subset, so an absent row is no evidence that it was deleted. Run `sync --full --company <slug>` to sweep rows deleted in Fiken. For the same reason a run that windowed any company no longer overwrites the recorded `result_count` for that resource (#22).
 
 ### Fixed
 

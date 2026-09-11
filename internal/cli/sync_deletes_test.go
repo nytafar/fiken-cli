@@ -90,6 +90,7 @@ func TestSyncDependentResource_CompletePullDeletesRowsTheAPIStoppedServing(t *te
 	if evs := deletedEvents(t, firstEvents.String()); len(evs) != 0 {
 		t.Fatalf("first sync emitted %d sync_deleted events, want 0\n%s", len(evs), firstEvents.String())
 	}
+	unwindowNextPull(t, db, "contacts", "testco")
 
 	// Contact 1002 is deleted in Fiken: the collection is now two rows and the
 	// header says so.
@@ -129,6 +130,7 @@ func TestSyncDependentResource_ShortPullDeletesNothingAndSaysSo(t *testing.T) {
 	if res := syncDependentResource(context.Background(), first, db, contactsDep(), "", false, 0, false, nil, &bytes.Buffer{}); res.Err != nil {
 		t.Fatalf("first sync: %v", res.Err)
 	}
+	unwindowNextPull(t, db, "contacts", "testco")
 
 	// Claims 3, serves 2.
 	_, short := newRowServer(t, contactRows(2), 100, 3)
@@ -168,6 +170,8 @@ func TestSyncDependentResource_WindowedPullDeletesNothing(t *testing.T) {
 		t.Fatalf("first sync: %v", res.Err)
 	}
 
+	unwindowNextPull(t, db, "contacts", "testco")
+
 	// The window matched one row, and the header describes the filtered set, so
 	// the count check passes: only AllowsDeletion stands between this pull and
 	// two deleted live rows.
@@ -202,6 +206,8 @@ func TestSyncDependentResource_CappedRunDeletesNothing(t *testing.T) {
 		t.Fatalf("first sync: %v", res.Err)
 	}
 
+	unwindowNextPull(t, db, "contacts", "testco")
+
 	_, capped := newRowServer(t, contactRows(2), 100, 2)
 	var events bytes.Buffer
 	if res := syncDependentResource(context.Background(), capped, db, contactsDep(), "", false, 1, false, nil, &events); res.Err != nil {
@@ -232,6 +238,7 @@ func TestSyncDependentResource_DeniedCompanyKeepsItsRows(t *testing.T) {
 	if got := contactIDsInMirror(t, db, "denied-co"); len(got) != 3 {
 		t.Fatalf("denied-co holds %v after the first sync, want 3 rows", got)
 	}
+	unwindowNextPull(t, db, "contacts", "denied-co", "good-co")
 
 	srv := httptest.NewServer(&deniedParentServer{deniedSlug: "denied-co", rows: contactRows(2)})
 	t.Cleanup(srv.Close)

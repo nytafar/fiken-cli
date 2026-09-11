@@ -61,6 +61,21 @@ func newSyncCmd(flags *rootFlags) *cobra.Command {
 incremental sync (only fetches new data since last sync) and full resync.
 Once synced, use the 'search' command for instant full-text search.
 
+Incremental by default:
+  A plain 'sync' asks Fiken only for what changed since this company's last
+  complete pull of that resource, on the seven resources whose list
+  endpoints accept a date filter (contacts, journal_entries, transactions,
+  products, sales, invoices, credit_notes).
+  The watermark is per company AND resource, is the START of the run that
+  filled it, and is only written after a pull that landed every page with no
+  error and no row-count mismatch — so an interrupted run re-pulls rather
+  than skips. A pair that has never completed a pull is fetched in full, as
+  is every resource without a date filter. Each windowed pair announces
+  itself with {"event":"sync_window","company":...,"resource":...,"since":...}.
+  --full ignores the watermark, clears it for the pairs it refetches, and
+  writes it again from the full pull; --since is a caller window and leaves
+  the watermark untouched in both directions.
+
 Exit codes & warnings:
   Resources the API denies access to (HTTP 403, or HTTP 400 with an
   access-policy body) are reported as warnings rather than failing the
@@ -225,6 +240,12 @@ Resource scoping:
 			}
 
 			started := time.Now()
+			// PATCH(sync-watermark): the instant a completed (company, resource)
+			// pull records as its watermark (issue #22). Taken before the first
+			// request, because rows keep changing while the run walks: a mark
+			// stamped when the walk ENDED would exclude everything modified
+			// during it, and nothing would ever fetch those rows again.
+			syncRunStartedAt = started
 			work := make(chan string, len(resources))
 			results := make(chan syncResult, len(resources))
 
@@ -400,8 +421,10 @@ Resource scoping:
 	// PATCH(sync-since-last-modified): the two are refused together in RunE —
 	// --full clears the scoped rows and --since would refetch only a window of
 	// them — so the help says so rather than letting a run find out.
-	cmd.Flags().BoolVar(&full, "full", false, "Full resync (ignore previous checkpoint). Cannot be combined with --since.")
-	cmd.Flags().StringVar(&since, "since", "", "Incremental sync duration (e.g. 7d, 24h, 1w, 30m). Cannot be combined with --full.")
+	// PATCH(sync-watermark): --full is now the way to ignore and reset the
+	// per-(company, resource) watermark a default run keeps (issue #22).
+	cmd.Flags().BoolVar(&full, "full", false, "Full resync: ignore and reset the per-company incremental watermark, refetching every row. Cannot be combined with --since.")
+	cmd.Flags().StringVar(&since, "since", "", "Explicit incremental window (e.g. 7d, 24h, 1w, 30m), applied to every company and leaving the stored watermark untouched. Cannot be combined with --full.")
 	cmd.Flags().IntVar(&concurrency, "concurrency", 1, "Number of parallel sync workers")
 	cmd.Flags().StringVar(&dbPath, "db", "", "Database path (default: ~/.local/share/fiken-cli/data.db)")
 	cmd.Flags().IntVar(&maxPages, "max-pages", 0, "Maximum pages to fetch per resource (0 = unlimited; cap-hit emits a sync_warning event)")
@@ -524,15 +547,16 @@ func syncResource(ctx context.Context, c interface {
 		// day-granular with no zone (issue #13). This is the one formatting
 		// site for both the --since flag and the watermark above.
 		//
-		// The watermark arm is INERT for every shipped resource, and saying so
-		// here beats implying otherwise: syncResource walks flat resources, and
-		// `companies` is the only one, so sinceParam is always "" here and the
-		// watermark is dropped by the resource_not_incremental branch above.
-		// The dependent walker, which handles every resource that DOES declare
-		// lastModifiedGe, never reads last_synced_at at all. In production only
-		// an explicit --since ever windows a pull; the default run is a full
-		// pull of every resource. A per-(company, resource) watermark is a
-		// separate change and is not in issue #13.
+		// The sync_state.last_synced_at arm above is INERT for every shipped
+		// resource, and saying so here beats implying otherwise: syncResource
+		// walks flat resources, and `companies` is the only one, so sinceParam
+		// is always "" here and it is dropped by the resource_not_incremental
+		// branch above.
+		// PATCH(sync-watermark): the default run IS incremental now, but not
+		// through this arm — the watermark that windows it is the per-(company,
+		// resource) row the dependent walker reads, not sync_state, which is
+		// keyed by resource_type alone and stays exactly as `doctor` expects it
+		// (issue #22).
 		effectiveSince = syncSinceWindowValue(effectiveSince, syncSinceParamFormatFor(resource))
 	}
 
@@ -1858,14 +1882,14 @@ func syncDependentResource(ctx context.Context, c interface {
 	pageSize := determinePaginationDefaults()
 	depSinceParam := syncSinceParamFor(dep.Name) // PATCH(pagination-headers)
 	// PATCH(sync-since-last-modified): sinceTS is the EXPLICIT --since and
-	// nothing else. This walker never reads sync_state.last_synced_at, so a
-	// default dependent run is a full pull of every page for every parent even
-	// for the five resources that declare lastModifiedGe; sync_state is keyed
-	// by resource_type alone, so a mirror-wide watermark could not be applied
-	// per (company, resource) anyway. `full` is therefore not consulted here:
-	// with no watermark to ignore there is nothing for it to switch off, and
-	// --full with --since is refused at flag validation because the combination
-	// clears rows it would then not refetch.
+	// nothing else; it is a caller window, applied to every parent alike.
+	// PATCH(sync-watermark): the DEFAULT path (no --since, no --full) is
+	// windowed too, but per parent rather than per resource — the watermark is
+	// keyed by (company, resource), so it is read inside the parent loop below
+	// and not here (issue #22). `full` is consulted there as well: it clears
+	// the pair's watermark before refetching it. --full with --since stays
+	// refused at flag validation, because that combination clears rows it would
+	// then not refetch.
 	depSinceTS := sinceTS
 	if depSinceTS != "" && depSinceParam == "" {
 		if humanFriendly {
@@ -1898,6 +1922,14 @@ func syncDependentResource(ctx context.Context, c interface {
 	// PATCH(sync-since-last-modified): see the flat walker; one value, read by
 	// the result-count recording today and by issue #17's deletion pass next.
 	depWindowedPull := newSyncPullWindow(depSinceParam, depSinceTS, userParams, dep.Name, true)
+	// PATCH(sync-watermark): a default run windows each parent from its own
+	// watermark, so "was this pull windowed" is answered per parent and summed
+	// here: the result count recorded for the resource is mirror-wide, and one
+	// windowed parent already makes the sum describe less than the collection
+	// (issue #22).
+	depAnyParentWindowed := false
+	depWatermarkStamp := syncWatermarkStamp(started)
+	depWatermarkMayAdvance := syncWatermarkMayAdvance(dep.Name, sinceTS, userParams)
 	parentFKKey := dep.ParentTable + "_id"
 
 	for idx, parentRow := range parentRows {
@@ -1923,6 +1955,29 @@ func syncDependentResource(ctx context.Context, c interface {
 		pageSink.Reset()
 		depLanded.Reset() // PATCH(pagination-headers)
 		parentTruncated := false
+		// PATCH(sync-watermark): this parent's own window (issue #22). On the
+		// default path it comes from the (company, resource) watermark; with
+		// --since or --full, or for an endpoint with no temporal filter, it is
+		// the resource-wide value computed above. A pair with no watermark gets
+		// no window and is pulled in full — that is the first run.
+		parentPull := depWindowedPull
+		if mark := syncWatermarkWindow(db, parentID, dep.Name, sinceTS, full); mark != "" {
+			parentPull = newSyncPullWindow(depSinceParam, mark, userParams, dep.Name, true)
+			emitSyncWindow(syncEvents, dep.Name, parentID, mark)
+		}
+		if full {
+			// The old mark cannot survive the refetch it is about to be
+			// replaced by: an interrupted --full must leave "pull me in full".
+			syncClearWatermark(db, parentID, dep.Name)
+		}
+		if parentPull.Windowed {
+			depAnyParentWindowed = true
+		}
+		// PATCH(sync-watermark): any failure this parent hit, including the
+		// access denial that is deliberately NOT counted as truncation for the
+		// result-count arithmetic. A watermark may only move over a pull that
+		// had none.
+		parentFailed := false
 
 		for {
 			params := map[string]string{}
@@ -1933,8 +1988,10 @@ func syncDependentResource(ctx context.Context, c interface {
 				}
 			}
 			// PATCH(sync-since-last-modified): from the walk's window value.
-			if depWindowedPull.Value != "" {
-				params[depWindowedPull.Param] = depWindowedPull.Value
+			// PATCH(sync-watermark): which is this parent's, because the
+			// watermark is per (company, resource) (issue #22).
+			if parentPull.Value != "" {
+				params[parentPull.Param] = parentPull.Value
 			}
 			// Apply user flags last so they win over spec-derived cursor/since/limit.
 			// Dependent path: --param is skipped (already scoped by the parent path
@@ -1946,6 +2003,7 @@ func syncDependentResource(ctx context.Context, c interface {
 				// Non-fatal per parent: log and continue to next parent.
 				// Track access-denial separately so an all-denied dependent
 				// resource can surface as a Warn rather than silent success.
+				parentFailed = true // PATCH(sync-watermark)
 				parentAccessDenied := false
 				if w, ok := isSyncAccessWarning(err); ok {
 					deniedParents++
@@ -2150,19 +2208,35 @@ func syncDependentResource(ctx context.Context, c interface {
 		// said to hold against what landed for it (issue #15). parentID is the
 		// company slug: every dependent here hangs off the companies table.
 		parentPageInfo := pageSink.PageInfo()
+		parentCountMismatch := false // PATCH(sync-watermark)
 		if parentPageInfo.HasResultCount {
 			depParentsWithResultCount++
 			depResultCountTotal += parentPageInfo.ResultCount
 			if !parentTruncated && depLanded.Len() != parentPageInfo.ResultCount {
+				parentCountMismatch = true
 				emitResultCountMismatch(syncEvents, dep.Name, parentID, parentPageInfo.ResultCount, depLanded.Len())
 			}
+		}
+		// PATCH(sync-watermark): the pull is now on record as complete or not,
+		// which is the last input the watermark needs (issue #22). Everything
+		// this run asked Fiken for landed for this (company, resource): no
+		// transport or access error, no truncation (cap, stuck cursor, upsert
+		// failure, unreadable body), and — where the API said how many rows the
+		// window held — exactly that many distinct rows. Anything less leaves
+		// the watermark alone and costs one more full pull next time, which is
+		// the only direction that cannot lose a row.
+		if depWatermarkMayAdvance && !parentFailed && !parentTruncated && !parentCountMismatch {
+			syncAdvanceWatermark(db, parentID, dep.Name, depWatermarkStamp)
 		}
 		// PATCH(sync-full-deletes): the mirror had no way to lose a row Fiken
 		// deleted (issue #17). A complete, unwindowed, untruncated pull of this
 		// company's collection — proven complete by the count check just above —
 		// is the only thing that makes an absent row evidence of a deletion, so
 		// the sweep is here, per parent, and consults all three of them.
-		syncPruneDeletedRows(db, syncEvents, dep.Name, parentID, depLanded, parentPageInfo, parentTruncated, depWindowedPull)
+		// PATCH(sync-watermark): with this parent's window, not the resource's:
+		// a pull windowed from the watermark saw only what changed, so every
+		// unchanged row is absent by construction and none of them is deleted.
+		syncPruneDeletedRows(db, syncEvents, dep.Name, parentID, depLanded, parentPageInfo, parentTruncated, parentPull)
 		if parentTruncated {
 			depWalkTruncated = true
 		}
@@ -2181,7 +2255,10 @@ func syncDependentResource(ctx context.Context, c interface {
 	// with each one either carrying the header or denying access before serving
 	// a page while holding no rows in the mirror, produces a number on the same
 	// scale as total_count, which is mirror-wide (issue #15).
-	recordSyncResultCount(db, dep.Name, depResultCountTotal, shouldRecordResultCount(everyParentAccountedFor(depParentsWithResultCount, depParentsDeniedAndEmpty, len(parentRows)), depWalkTruncated, depWindowedPull.Windowed))
+	// PATCH(sync-watermark): windowedness is per parent now, so the run counts
+	// as windowed when ANY parent was — the sum is then short of the collection
+	// by whatever the other parents did not change (issue #22).
+	recordSyncResultCount(db, dep.Name, depResultCountTotal, shouldRecordResultCount(everyParentAccountedFor(depParentsWithResultCount, depParentsDeniedAndEmpty, len(parentRows)), depWalkTruncated, depWindowedPull.Windowed || depAnyParentWindowed))
 
 	// F4b symptom probe: items consumed and extracted but nothing landed.
 	// See syncResource for rationale.

@@ -21,6 +21,10 @@ import (
 func (s *Store) migrateExtras(ctx context.Context, conn *sql.Conn) error {
 	migrations := []string{
 		// Add CREATE TABLE IF NOT EXISTS statements here.
+		//
+		// The per-(company, resource) sync watermark (issue #22). Declared in
+		// sync_watermark.go beside the accessors that read and write it.
+		syncWatermarkCreateSQL,
 	}
 	for _, m := range migrations {
 		if _, err := conn.ExecContext(ctx, m); err != nil {

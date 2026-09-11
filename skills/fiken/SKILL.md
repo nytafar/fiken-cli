@@ -439,6 +439,10 @@ Add `--agent` to any command. Expands to: `--json --compact --no-input --no-colo
 - **Non-interactive** — never prompts, every input is a flag
 - **Explicit retries** — use `--idempotent` only when an already-existing create should count as success, and `--ignore-missing` only when a missing delete target should count as success
 
+### Keeping the mirror fresh
+
+`fiken-cli sync` is incremental by default: every (company, resource) pair keeps its own watermark, so a repeat run asks Fiken only for rows modified since that company's last complete pull, on the seven resources whose endpoints accept a date filter (contacts, journal_entries, transactions, products, sales, invoices, credit_notes). A pair that has never completed a pull — and every resource without a date filter — is fetched in full. Each windowed pair emits `{"event":"sync_window","company":...,"resource":...,"since":...}`, so an unattended run can report what was cheap. The watermark only moves after a pull that landed every page with no error and no row-count mismatch, so an interrupted run costs a re-pull, never a skipped row. Use `--since 7d` to force an explicit window for every company (it leaves the watermark alone), and `--full` to ignore and reset the watermark and refetch everything — `--full` is also what re-detects rows deleted in Fiken, since a windowed pull cannot tell an unchanged row from a deleted one.
+
 ### Response envelope
 
 Commands that read from the local store or the API wrap output in a provenance envelope:

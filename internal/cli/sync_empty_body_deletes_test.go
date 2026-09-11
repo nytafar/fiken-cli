@@ -62,6 +62,9 @@ func seedThreeContacts(t *testing.T) *store.Store {
 	if got := contactIDsInMirror(t, db, "testco"); len(got) != 3 {
 		t.Fatalf("mirror holds %v after seeding, want 3 rows", got)
 	}
+	// The seeding pull left a watermark; the pull under test is about deletion,
+	// which only an unwindowed pull can conclude anything about (issue #22).
+	unwindowNextPull(t, db, "contacts", "testco")
 	return db
 }
 

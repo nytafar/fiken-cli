@@ -15,21 +15,27 @@
 //     time-of-day suffix is not a valid value for a format: date parameter);
 //     the extra day is the margin the day granularity costs, because the
 //     client's local day boundary is not necessarily the one the API stamped
-//     the row with, the watermark is written when the run ENDS while rows keep
-//     changing during it, and client and server clocks need not agree. The
+//     the row with, and client and server clocks need not agree. (The third
+//     reason it was written for — a watermark stamped when the run ENDED while
+//     rows kept changing during it — is gone: issue #22 stamps the run's START.
+//     The other two are enough on their own.) The
 //     result re-pulls at most two days of rows on every incremental run:
 //     missing a row is the failure that matters, re-upserting one is idempotent
 //     and free.
 //
-//     Read "incremental run" as "a run the caller gave --since". The stored
-//     last_synced_at watermark does NOT window a shipped pull: syncResource is
-//     the only reader of it and it walks `companies`, the sole flat resource,
-//     which declares no date filter; the dependent walker owns all five
-//     resources that do declare lastModifiedGe and never reads the watermark.
-//     A default `fiken-cli sync` is therefore still a full pull of every
-//     resource. sync_state is keyed by resource_type alone, so a per-(company,
-//     resource) watermark is a schema change and a separate issue, not this
-//     one.
+//     Read "incremental run" as either of the two things that produce a
+//     window. The caller's --since is one. The other, since issue #22, is the
+//     DEFAULT run: the dependent walker reads a watermark per (company,
+//     resource) from the sync_watermark table and windows each parent's pull
+//     from its own, so a plain `fiken-cli sync` asks Fiken only for what
+//     changed. Both arrive here and get the same treatment — this function is
+//     the single formatting site for the wire value. The policy around it (who
+//     may read a watermark, who may write one, and what --full and --since do
+//     to it) lives in sync_watermark.go; sync_state.last_synced_at is NOT that
+//     watermark and never was — it is keyed by resource_type alone, so a
+//     --company A run would move a number company B reads, and its only reader
+//     remains syncResource, which walks `companies`, the sole flat resource,
+//     which declares no date filter.
 //
 //   - syncPullWindow is the walk's one answer to "was this pull a subset of the
 //     collection", kept as a value for the whole walk instead of a bare local
