@@ -1,0 +1,21 @@
+{
+  "schema_version": 2,
+  "id": "release-2-2-0",
+  "applied_at": "2026-09-11",
+  "base_run_id": "20260609-145046",
+  "base_printing_press_version": "4.24.0",
+  "summary": "chore(release): 2.2.0 (supersedes release-2-1-0)",
+  "reason": "internal/cli/version.go is generated and carries the generator's default literal (1.0.0); a reprint resets it. The literal has been bumped in place with a PATCH marker at every release since 2.0.0 (2026-09-10, the breaking one: one Report envelope for every detector inside the provenance envelope, --period defaulting to the current year, exit code 8 for a guarded write) so that a regeneration fails closed rather than silently shipping 1.0.0. 2.2.0 (2026-09-11: #23 authenticated document and attachment download, #22 per-pair incremental sync watermark with deletion detection narrowed to full pulls, the checksum-verified release installer and the README split into docs/) bumps the same literal again; this record replaces release-2-1-0 so the needle pins the current version, not a stale one. .goreleaser.yaml injects -X fiken-cli/internal/cli.version at release time, which matches this var; the Makefile injects nothing, so `make build`/`go install` binaries carry exactly this literal. The second goreleaser build (fiken-mcp) injects main.version, whose in-tree default in cmd/fiken-mcp/main.go stays 0.0.0-dev and is not touched here. CHANGELOG.md carries the 2.2.0 section above 2.1.0.",
+  "files": [
+    "internal/cli/version.go",
+    "CHANGELOG.md"
+  ],
+  "call_sites": [
+    "PATCH(release-2-2-0)",
+    "var version = \"2.2.0\"",
+    "## 2.2.0 - 2026-09-11",
+    "## 2.1.0 - 2026-09-11"
+  ],
+  "validated_outcome": "go build ./... and `make check` pass; `fiken-cli --version` prints 2.2.0.",
+  "patch_count": 1
+}

@@ -4,8 +4,11 @@ This file is maintained by printing-press-library release automation. Do not han
 
 ## Unreleased
 
+## 2.2.0 - 2026-09-11
+
 ### Added
 
+- `install.sh` downloads the checksum-verified GitHub release archive for the host OS and arch into `~/.local/bin`; `--from-source` keeps the `go install` path, `--with-mcp` adds `fiken-mcp`, and `--skills`/`--link-skills` are opt-in. Skills install through `npx skills add` by default, so setup is two commands. The README keeps the pitch, install and quick start; the feature catalogue, command reference, configuration, MCP notes and design/roadmap move to `docs/`, which release archives now carry.
 - `inbox get-document --output <path>` downloads the file behind the document's `documentUrl` through the authenticated client instead of leaving the bearer token to be curled by hand: a file path writes that name, a directory (or a trailing `/`) writes the document's own filename, `-` streams to stdout, and `--dry-run` prints the request without fetching. `purchases attachments get-purchase` and `sales attachments get-sale` take the same flag and write every attachment into the directory given. `--agent`/JSON mode prints `{"path":…,"bytes":…,"filename":…}` for one file and `{"files":[…],"count":…,"bytes":…}` for several (#23).
 - A plain `sync` is now incremental: each (company, resource) pair keeps its own watermark in a new `sync_watermark` table, and a repeat run sends `lastModifiedGe` for contacts, journal_entries, transactions, products, sales, invoices and credit_notes, announcing each windowed pair with `{"event":"sync_window","company":...,"resource":...,"since":...}`. A pair that has never completed a pull, and every resource without a date filter, is still fetched in full. The watermark is the start of the run that filled it and is written only after a pull with no error and no row-count mismatch, so an interrupted run re-pulls rather than skips. `--since` stays a caller window and leaves the watermark untouched; `--full` ignores it, clears it for every pair in its scope before the first request — so a `--full` that is interrupted after it deletes rows leaves "pull me in full" rather than a mark for rows it never refetched — and writes it again from the full pull (#22).
 
