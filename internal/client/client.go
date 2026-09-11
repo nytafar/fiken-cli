@@ -656,6 +656,11 @@ func (c *Client) doInternal(ctx context.Context, method, path string, params map
 		// Success
 		if resp.StatusCode < 400 {
 			c.limiter.OnSuccess()
+			// PATCH(pagination-headers): a bare-array list response carries its
+			// completeness signal only in the Fiken-Api-* headers, which were
+			// dropped here with the rest of resp.Header (issue #15). Hand them
+			// to the context sink in page_info.go; no-op without one.
+			capturePageInfo(ctx, resp.Header)
 			if method != http.MethodGet && !c.DryRun {
 				c.invalidateCache()
 			}

@@ -449,6 +449,13 @@ func collectCacheReport(ctx context.Context, staleAfterSpec string) map[string]a
 			continue
 		}
 		r := map[string]any{"type": rtype, "rows": count}
+		// PATCH(pagination-headers): show the API's own row count next to the
+		// one the mirror holds, so a short resource is visible in doctor
+		// instead of only in the sync stream (issue #15). Absent until a
+		// complete, unscoped sync recorded one.
+		if resultCount, ok := s.SyncResultCount(rtype); ok {
+			r["result_count"] = resultCount
+		}
 		if lastSynced.Valid {
 			haveAny = true
 			r["last_synced_at"] = lastSynced.Time.UTC().Format(time.RFC3339)

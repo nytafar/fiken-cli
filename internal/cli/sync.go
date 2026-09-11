@@ -392,6 +392,11 @@ func syncResource(ctx context.Context, c interface {
 	if syncEvents == nil {
 		syncEvents = io.Discard
 	}
+	// PATCH(pagination-headers): collect the Fiken-Api-* headers of this walk's
+	// first page, the only statement Fiken makes about how many rows the
+	// collection holds (issue #15). c.Get keeps its signature; the sink rides
+	// the context.
+	ctx, pageSink := client.NewPageInfoContext(ctx)
 
 	if !humanFriendly {
 		fmt.Fprintf(syncEvents, `{"event":"sync_start","resource":"%s"}`+"\n", resource)
@@ -475,6 +480,11 @@ func syncResource(ctx context.Context, c interface {
 	}
 
 	cursor := existingCursor
+	// PATCH(pagination-headers): a walk that resumes from a stored cursor lands
+	// only the tail of the collection, so its row count is not comparable with
+	// Fiken-Api-Result-Count; the same applies to every early exit below
+	// (issue #15). Only an uncapped walk over a whole collection is compared.
+	walkTruncated := cursor != ""
 	pageSize := determinePaginationDefaults()
 	var progressCount int64
 	pagesFetched := 0
@@ -574,6 +584,7 @@ func syncResource(ctx context.Context, c interface {
 			} else {
 				fmt.Fprintf(syncEvents, `{"event":"sync_anomaly","resource":"%s","reason":"non_json_200_body"}`+"\n", resource)
 			}
+			walkTruncated = true // PATCH(pagination-headers)
 			break
 		}
 
@@ -669,6 +680,7 @@ func syncResource(ctx context.Context, c interface {
 		// warning per paginated resource would mask real sync_anomaly /
 		// sync_error output in the same stream.
 		if maxPages > 0 && pagesFetched >= maxPages {
+			walkTruncated = true // PATCH(pagination-headers)
 			truncatedByCap := resourceSupportsPagination(resource) && hasMore
 			truncatedByCap = truncatedByCap && len(items) >= pageSize.limit
 			if truncatedByCap {
@@ -707,6 +719,7 @@ func syncResource(ctx context.Context, c interface {
 			} else {
 				fmt.Fprintf(syncEvents, `{"event":"sync_warning","resource":"%s","reason":"stuck_pagination","message":"API returned the same next cursor across two pages for resource %s; aborting to prevent budget waste."}`+"\n", resource, resource)
 			}
+			walkTruncated = true // PATCH(pagination-headers)
 			break
 		}
 		lastNextCursor = nextCursor
@@ -749,6 +762,17 @@ func syncResource(ctx context.Context, c interface {
 	// PATCH(mirror-canonical-resource-name): persist the real row count, not this
 	// run's running counter (issue #6 §3).
 	_ = db.SaveSyncState(resource, finalCursor, syncStateTotalCount(db, resource, totalCount))
+
+	// PATCH(pagination-headers): the completeness check issue #15 exists for.
+	// Fiken-Api-Result-Count is what the API says the collection holds; a
+	// complete walk that landed a different number of rows means the mirror is
+	// short (issue #12 was exactly this, unseen). Recorded beside total_count so
+	// doctor can show both.
+	firstPageInfo := pageSink.PageInfo()
+	if firstPageInfo.HasResultCount && !walkTruncated && totalCount != firstPageInfo.ResultCount {
+		emitResultCountMismatch(syncEvents, resource, "", firstPageInfo.ResultCount, totalCount)
+	}
+	recordSyncResultCount(db, resource, firstPageInfo.ResultCount, syncResultCountComparable(firstPageInfo.HasResultCount, walkTruncated))
 
 	// F4b symptom probe: if items were consumed and successfully
 	// extracted (extractFailures < consumed) but nothing landed in
@@ -1652,6 +1676,10 @@ func syncDependentResource(ctx context.Context, c interface {
 	if syncEvents == nil {
 		syncEvents = io.Discard
 	}
+	// PATCH(pagination-headers): one sink for the whole dependent walk, reset
+	// per parent — Fiken-Api-Result-Count describes one company's collection,
+	// so the comparison is per (company, resource) (issue #15).
+	ctx, pageSink := client.NewPageInfoContext(ctx)
 
 	pathParams := dep.PathParams
 	if len(pathParams) == 0 {
@@ -1701,6 +1729,11 @@ func syncDependentResource(ctx context.Context, c interface {
 	var depExtractFailureTotal int
 	var depConsumedTotal int
 	depAnomalyEmitted := false
+	// PATCH(pagination-headers): the API's own row count, summed over the
+	// parents this run walked, and whether every one of them reported it.
+	depResultCountTotal := 0
+	depParentsWithResultCount := 0
+	depWalkTruncated := false
 	parentFKKey := dep.ParentTable + "_id"
 
 	for idx, parentRow := range parentRows {
@@ -1721,6 +1754,11 @@ func syncDependentResource(ctx context.Context, c interface {
 		cursor := ""
 		pagesFetched := 0
 		lastNextCursor := ""
+		// PATCH(pagination-headers): per-(company, resource) row count and
+		// early-exit flag for the completeness check after this parent's walk.
+		pageSink.Reset()
+		parentCount := 0
+		parentTruncated := false
 
 		for {
 			params := map[string]string{}
@@ -1761,6 +1799,7 @@ func syncDependentResource(ctx context.Context, c interface {
 					// sync_error so the API body and status are inspectable.
 					fmt.Fprintln(syncEvents, syncErrorJSON(dep.Name, parentID, err))
 				}
+				parentTruncated = true // PATCH(pagination-headers)
 				break
 			}
 
@@ -1794,6 +1833,7 @@ func syncDependentResource(ctx context.Context, c interface {
 				} else {
 					fmt.Fprintf(syncEvents, `{"event":"sync_anomaly","resource":"%s","parent":"%s","reason":"non_json_200_body"}`+"\n", dep.Name, parentID)
 				}
+				parentTruncated = true // PATCH(pagination-headers)
 				break
 			}
 
@@ -1829,6 +1869,7 @@ func syncDependentResource(ctx context.Context, c interface {
 				if humanFriendly {
 					fmt.Fprintf(os.Stderr, "\n  %s: upsert error for parent %s: %v\n", dep.Name, parentID, err)
 				}
+				parentTruncated = true // PATCH(pagination-headers)
 				break
 			}
 
@@ -1855,12 +1896,14 @@ func syncDependentResource(ctx context.Context, c interface {
 			}
 
 			totalCount += stored
+			parentCount += stored // PATCH(pagination-headers)
 			if resourceSupportsPagination(dep.Name) && nextCursor == "" && pageSize.cursorParam != "offset" && len(items) >= pageSize.limit && pageMayHaveMore(data) {
 				emitSyncMissingPaginationCursorWarning(syncEvents, humanFriendly, dep.Name, parentID)
 			}
 			pagesFetched++
 
 			if maxPages > 0 && pagesFetched >= maxPages {
+				parentTruncated = true // PATCH(pagination-headers)
 				if !latestOnly {
 					if humanFriendly {
 						fmt.Fprintf(os.Stderr, "\n  %s: reached --max-pages limit (%d pages, %d items) for parent %s\n", dep.Name, maxPages, totalCount, parentID)
@@ -1879,6 +1922,7 @@ func syncDependentResource(ctx context.Context, c interface {
 				} else {
 					fmt.Fprintf(syncEvents, `{"event":"sync_warning","resource":"%s","parent":"%s","reason":"stuck_pagination","message":"API returned the same next cursor across two pages for resource %s; aborting to prevent budget waste."}`+"\n", dep.Name, parentID, dep.Name)
 				}
+				parentTruncated = true // PATCH(pagination-headers)
 				break
 			}
 			lastNextCursor = nextCursor
@@ -1903,6 +1947,21 @@ func syncDependentResource(ctx context.Context, c interface {
 			cursor = nextCursor
 		}
 
+		// PATCH(pagination-headers): compare what this company's collection was
+		// said to hold against what landed for it (issue #15). parentID is the
+		// company slug: every dependent here hangs off the companies table.
+		parentPageInfo := pageSink.PageInfo()
+		if parentPageInfo.HasResultCount {
+			depParentsWithResultCount++
+			depResultCountTotal += parentPageInfo.ResultCount
+			if !parentTruncated && parentCount != parentPageInfo.ResultCount {
+				emitResultCountMismatch(syncEvents, dep.Name, parentID, parentPageInfo.ResultCount, parentCount)
+			}
+		}
+		if parentTruncated {
+			depWalkTruncated = true
+		}
+
 		// Brief rate-limit pause between parents to avoid hammering the API
 		time.Sleep(100 * time.Millisecond)
 	}
@@ -1913,6 +1972,10 @@ func syncDependentResource(ctx context.Context, c interface {
 
 	// PATCH(mirror-canonical-resource-name): persist the real row count (issue #6 §3).
 	_ = db.SaveSyncState(dep.Name, "", syncStateTotalCount(db, dep.Name, totalCount))
+	// PATCH(pagination-headers): only a run that walked every parent to the end
+	// with the header present produces a number on the same scale as
+	// total_count, which is mirror-wide (issue #15).
+	recordSyncResultCount(db, dep.Name, depResultCountTotal, syncResultCountComparable(depParentsWithResultCount == len(parentRows), depWalkTruncated))
 
 	// F4b symptom probe: items consumed and extracted but nothing landed.
 	// See syncResource for rationale.

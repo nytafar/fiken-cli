@@ -199,6 +199,12 @@ func resolvePaginatedReadWithStrategy(ctx context.Context, c *client.Client, fla
 	if err := validateDataSourceStrategy(flags, strategy); err != nil {
 		return nil, DataProvenance{}, err
 	}
+	// PATCH(pagination-headers): collect the Fiken-Api-* headers of the first
+	// page of this walk so the provenance envelope can report result_count and
+	// page_count (issue #15). The sink is a context value, so paginatedGet and
+	// its 27 generated call sites keep their signatures; a local read or a
+	// cache hit simply leaves it empty.
+	ctx, pageSink := client.NewPageInfoContext(ctx)
 	// PATCH(mirror-canonical-resource-name): one spelling for the mirror. The
 	// generated read commands pass the kebab CLI name ("bank-accounts") while sync
 	// writes the snake registry name ("bank_accounts"), so the read path's
@@ -221,7 +227,8 @@ func resolvePaginatedReadWithStrategy(ctx context.Context, c *client.Client, fla
 		if err != nil {
 			return nil, DataProvenance{}, err
 		}
-		return data, attachFreshness(DataProvenance{Source: "live"}, flags), nil
+		// PATCH(pagination-headers): surface the API's own counts (issue #15).
+		return data, attachPageInfo(attachFreshness(DataProvenance{Source: "live"}, flags), pageSink), nil
 	}
 	switch flags.dataSource {
 	case "local":
@@ -233,13 +240,15 @@ func resolvePaginatedReadWithStrategy(ctx context.Context, c *client.Client, fla
 		if err != nil {
 			return nil, DataProvenance{}, err
 		}
-		return data, attachFreshness(DataProvenance{Source: "live"}, flags), nil
+		// PATCH(pagination-headers): surface the API's own counts (issue #15).
+		return data, attachPageInfo(attachFreshness(DataProvenance{Source: "live"}, flags), pageSink), nil
 
 	default: // "auto"
 		data, err := paginatedGet(ctx, c, path, params, headers, fetchAll, cursorParam, paginationType, limitParam, nextCursorPath, hasMoreField)
 		if err == nil {
 			writeThroughCache(ctx, resourceType, companySlug, data)
-			return data, attachFreshness(DataProvenance{Source: "live"}, flags), nil
+			// PATCH(pagination-headers): surface the API's own counts (issue #15).
+			return data, attachPageInfo(attachFreshness(DataProvenance{Source: "live"}, flags), pageSink), nil
 		}
 		if !isNetworkError(err) {
 			return nil, DataProvenance{}, err

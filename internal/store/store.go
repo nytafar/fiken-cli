@@ -301,6 +301,11 @@ func (s *Store) backfillColumns(ctx context.Context, conn *sql.Conn) error {
 		{table: "sync_state", column: "last_cursor", decl: "TEXT"},
 		{table: "sync_state", column: "last_synced_at", decl: "DATETIME"},
 		{table: "sync_state", column: "total_count", decl: "INTEGER DEFAULT 0"},
+		// PATCH(pagination-headers): the row count the API itself reports for a
+		// resource (Fiken-Api-Result-Count), recorded beside the count the mirror
+		// holds so doctor can show both (issue #15). Nullable on purpose: NULL
+		// means "no run has seen the header", which is not the same as 0 rows.
+		{table: "sync_state", column: "result_count", decl: "INTEGER"},
 	} {
 		if err := s.ensureColumn(ctx, conn, c.table, c.column, c.decl); err != nil {
 			return err
@@ -359,7 +364,12 @@ func (s *Store) migrate(ctx context.Context) error {
 			resource_type TEXT PRIMARY KEY,
 			last_cursor TEXT,
 			last_synced_at DATETIME,
-			total_count INTEGER DEFAULT 0
+			total_count INTEGER DEFAULT 0,
+			-- PATCH(pagination-headers): result_count, the row count the API
+			-- itself reports (issue #15). Declared here for a fresh DB and
+			-- backfilled by backfillColumns for an existing one; this CREATE
+			-- runs after the backfill, so the column needs both.
+			result_count INTEGER
 		)`,
 		resourcesFTSCreateSQL,
 		`CREATE TABLE IF NOT EXISTS "accounts" (
@@ -2856,6 +2866,39 @@ func (s *Store) GetSyncState(resourceType string) (cursor string, lastSynced tim
 		return "", time.Time{}, 0, nil
 	}
 	return
+}
+
+// PATCH(pagination-headers): SaveSyncState siblings for the API's own row
+// count (Fiken-Api-Result-Count, issue #15). Kept apart from SaveSyncState so
+// the 30-odd existing call sites keep their signature and a run that saw no
+// header leaves the recorded value untouched instead of zeroing it.
+func (s *Store) SaveSyncResultCount(resourceType string, resultCount int) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	_, err := s.db.Exec(
+		`INSERT INTO sync_state (resource_type, result_count)
+		 VALUES (?, ?)
+		 ON CONFLICT(resource_type) DO UPDATE SET result_count = excluded.result_count`,
+		resourceType, resultCount,
+	)
+	return err
+}
+
+// SyncResultCount returns the last recorded Fiken-Api-Result-Count for a
+// resource. ok is false when no run ever recorded one, so a caller can tell
+// "never seen" from "the API says zero".
+func (s *Store) SyncResultCount(resourceType string) (count int, ok bool) {
+	var value sql.NullInt64
+	if err := s.db.QueryRow(
+		`SELECT result_count FROM sync_state WHERE resource_type = ?`,
+		resourceType,
+	).Scan(&value); err != nil {
+		return 0, false
+	}
+	if !value.Valid {
+		return 0, false
+	}
+	return int(value.Int64), true
 }
 
 // SaveSyncCursor stores the pagination cursor for a resource type.

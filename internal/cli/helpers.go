@@ -1828,6 +1828,12 @@ type DataProvenance struct {
 	Reason       string     `json:"reason,omitempty"`        // why local was used: "user_requested", "api_unreachable", "no_search_endpoint"
 	ResourceType string     `json:"resource_type,omitempty"` // which resource type was queried
 	Freshness    any        `json:"freshness,omitempty"`     // optional machine-owned freshness metadata for covered command paths
+	// PATCH(pagination-headers): Fiken list endpoints answer with a bare array,
+	// so the only completeness signal is the Fiken-Api-* header block (issue
+	// #15). Pointers, not ints: an absent header must not be published as a
+	// zero count. Filled by attachPageInfo (pagination_headers.go).
+	ResultCount *int `json:"result_count,omitempty"` // Fiken-Api-Result-Count: rows in the whole collection
+	PageCount   *int `json:"page_count,omitempty"`   // Fiken-Api-Page-Count: pages in the whole collection
 }
 
 // printProvenance writes a one-line provenance message to stderr for TTY users.
@@ -1920,6 +1926,15 @@ func wrapWithProvenance(data json.RawMessage, prov DataProvenance) (json.RawMess
 	}
 	if prov.Freshness != nil {
 		meta["freshness"] = prov.Freshness
+	}
+	// PATCH(pagination-headers): let a consumer of the envelope see whether the
+	// page it got is the whole collection (issue #15). Omitted, never zeroed,
+	// when the response carried no headers.
+	if prov.ResultCount != nil {
+		meta["result_count"] = *prov.ResultCount
+	}
+	if prov.PageCount != nil {
+		meta["page_count"] = *prov.PageCount
 	}
 	var results any
 	if json.Valid(data) {
