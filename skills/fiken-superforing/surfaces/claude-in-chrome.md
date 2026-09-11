@@ -5,9 +5,12 @@ Load the tools once: `tabs_context_mcp`, `navigate`, `get_page_text`, `javascrip
 
 - Work in your own tab group. The user's tabs are invisible to you; open the panel URL
   yourself with `navigate`, do not ask for their tab.
+- After the first `navigate`, check the tab title. `Logg inn - Fiken` means signed out: the
+  extension cannot enter credentials, so stop and ask the user to sign in.
 - Read with `javascript_tool` and the primitives in
   [`../reference/superforing-dom.md`](../reference/superforing-dom.md). `get_page_text` is
-  enough for a first look but lacks `linje.id`. Screenshots are for a final sanity check only.
+  enough for a first look but lacks `linje.id`. Returns are truncated; use the stash-and-page
+  pattern from the DOM reference. Screenshots are for a final sanity check only.
 - Each `javascript_tool` call is capped near 45 s. Confirm a handful of lines per call and
   re-scan; the loops are resumable because they read live state.
 - After any API write that should change a suggestion, `navigate` to the same URL again.

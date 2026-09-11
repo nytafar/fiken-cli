@@ -34,7 +34,7 @@ Every booking starts from a live bank line and ends with that line confirmed in 
 1. Resolve `bankAccountId` for the account: `fiken-cli bank-accounts get <slug> --agent`.
 2. Open the panel for the period and read the lines. Method per surface:
    - Claude in Chrome: [`surfaces/claude-in-chrome.md`](surfaces/claude-in-chrome.md)
-   - CDP script (headless or debug-port Chromium): [`surfaces/cdp.md`](surfaces/cdp.md)
+   - CDP script against the user's headed Chromium, preferred when port 9222 answers: [`surfaces/cdp.md`](surfaces/cdp.md)
    Both read the same DOM; the shared facts are in
    [`reference/superforing-dom.md`](reference/superforing-dom.md).
 3. Pick the flow for each line and follow it to the end:

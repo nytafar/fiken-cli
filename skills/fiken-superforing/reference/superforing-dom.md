@@ -15,9 +15,12 @@ https://fiken.no/foretak/{slug}/bank/bkbf/{bankAccountId}?b&nf&fra=YYYY-MM-DD&ti
 | `fra`, `til` | period, inclusive |
 | `kunInnbetalinger=false` | only utbetalinger |
 | `kunInnbetalinger=true` | only innbetalinger |
-| `sok=<text>` | free-text search on the line, e.g. `sok=vipps` |
+| `sok=<text>` | substring search on the raw bank text (`tekst`), e.g. `sok=vipps`; `name-cheap` hits, `namecheap` does not |
 | `side=N` | page, 0-based; SPA pagination, no reload |
 | `linje=<id>` | the one open row; set by clicking a row, advances on confirm |
+
+A page titled `Logg inn - Fiken` means the browser session is signed out; stop and ask the
+user to sign in, then navigate again.
 
 `bankAccountId` comes from `fiken-cli bank-accounts get <slug> --agent`. Account picker
 without an id: `https://fiken.no/foretak/{slug}/bank/bkbf/`.
@@ -53,6 +56,7 @@ before reading buttons; reading earlier yields a false "no suggestion".
 | `Registrer nytt kjøp` / `Registrer nytt salg` | only an inbox document matched, no paid voucher | fix books, reload, re-read |
 | `Forslaget stemmer ikke, jeg vil endre` | reject suggestion | never |
 | `Fri postering`, `Alternativer` | no suggestion | park |
+| `Gå til neste` only, text `Samme beløp finnes flere steder` | two lines share one amount and one voucher; the extra line is a double payment | park both, report |
 
 Confirming removes the line from the list (under `nf`), shrinks the count by one, and opens
 the next line. The API shows no change on the purchase or its journal entries; the
@@ -61,6 +65,19 @@ line-to-voucher link exists only in the panel and in our audit log.
 A purchase created via API with a **registered payment** becomes `OK, gå til neste` after a
 page reload. Without a payment, the same line keeps `Registrer nytt kjøp` even when the
 purchase exists. The panel does not re-evaluate without a reload.
+
+## Reading the list without truncation
+
+The tool that evaluates page JS caps its return at a few hundred characters. Stash the rows on
+`window` and page them out:
+
+```js
+window.__L = linjer().map(l => [l.id, l.dato, l.linjeBelop, l.besteBelop, norm(l.tittel).slice(0,28)].join('|'));
+'N=' + window.__L.length + '\n' + window.__L.slice(0, 16).join('\n')   // then slice(16, 32) …
+```
+
+Five fields per row and sixteen rows per call fits. Button reads and confirms return one
+short line per id.
 
 ## Primitives (page context JS)
 
