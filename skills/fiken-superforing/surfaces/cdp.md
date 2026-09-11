@@ -28,4 +28,7 @@ node $S confirm 12046895329 12046895333 --fra … --til … --log --correlation-
   buttons present. With `--log` it also writes `match.confirmed` through `fiken-cli log-event`.
   Exit 4 if any row did not confirm; the rows that did are still confirmed and logged.
 - After an API write, rerun the command: it re-navigates to the same URL, which is the reload.
+  Otherwise calls stay on the open row; the `linje=` parameter is ignored when comparing URLs.
+- The human sees the same tab. Calls that expand rows move their view; keep exploration in
+  `eval` short and re-list before a write in case they clicked meanwhile.
 - One `Runtime.evaluate` per row, so the 45 s cap of the extension bridge does not apply.

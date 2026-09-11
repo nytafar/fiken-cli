@@ -25,7 +25,14 @@ Every booking starts from a live bank line and ends with that line confirmed in 
   the purchase is missing or unpaid. Fix the books, reload, then confirm. Lines offering
   nothing else are **parked** and reported.
 - **Log every side effect** with `fiken-cli log-event`: `--surface browser` for confirms
-  keyed `linje:<id>`, `--surface api` for purchases, payments and inbox deletions.
+  keyed `linje:<id>`, `--surface api` for purchases, payments and inbox deletions. One
+  `--correlation-id` per run, shaped `superforing-<slug>-<period>-<yyyymmdd>`, on every event.
+- **Log a confirm only after the row is gone.** `confirm --log` does this. A hand-logged
+  event for a row still open is wrong: find its `id` in `agent_events` in
+  `~/.local/share/fiken-cli/fiken-core.db` and log `match.reversed --reverses <id>`.
+- **The browser is shared.** The human may click while the agent works, and that is the
+  point of a headed session: they can sign in and give verdicts. Re-list before every write.
+  A row gone without a script confirm was the human's click: log it with `--actor <user>`.
 - Writes need live mode: `FIKEN_MODE=live` in `~/.config/fiken-cli/env` or `./.env.local`.
   A refusal with exit 8 means test mode; stop and tell the user.
 
@@ -37,13 +44,22 @@ Every booking starts from a live bank line and ends with that line confirmed in 
    - CDP script against the user's headed Chromium, preferred when port 9222 answers: [`surfaces/cdp.md`](surfaces/cdp.md)
    Both read the same DOM; the shared facts are in
    [`reference/superforing-dom.md`](reference/superforing-dom.md).
-3. Pick the flow for each line and follow it to the end:
+3. Work the lines in this order, so the user is interrupted once, late:
+   1. `show` every row; confirm the clean ones (`OK, gå til neste`, `Bekreft dato`).
+   2. Book and confirm the rows a flow can fix from the books.
+   3. Raise every verdict question in one batch, then act on the answers.
+   4. Park the rest.
+   Pick the flow for each line and follow it to the end:
    - Utbetaling with a supplier receipt: [`flows/utbetaling-kjop.md`](flows/utbetaling-kjop.md)
    - Innbetaling, Vipps- and Stripe-oppgjør, customer invoice payments: [`flows/innbetaling.md`](flows/innbetaling.md)
    - Two lines, one amount, radio candidates (double payment): [`flows/dobbeltbetaling.md`](flows/dobbeltbetaling.md)
    - `Antatt` row whose `Leverandør` differs from the bank title: [`flows/leverandor-navnebytte.md`](flows/leverandor-navnebytte.md)
 4. Done when every line in the period is either confirmed or parked with a reason, and the
    parked list is in the final report with `linje.id`, date, amount and reason.
+
+Receipts downloaded during a run go to `bilag/<documentId>.pdf` under the period's working
+folder; they are throwaway once attached to the purchase. Book from the bank line: prepared
+proposal files are not part of the flow.
 
 ## Adding a flow
 
