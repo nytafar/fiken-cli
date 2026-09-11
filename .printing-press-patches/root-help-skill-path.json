@@ -1,0 +1,17 @@
+{
+  "schema_version": 2,
+  "id": "root-help-skill-path",
+  "applied_at": "2026-09-11",
+  "base_run_id": "20260609-145046",
+  "base_printing_press_version": "4.24.0",
+  "summary": "docs(root): point the root help at skills/fiken/SKILL.md",
+  "reason": "The printed root help said \"See README.md or the bundled SKILL.md for recipes\", which was true of a print that dropped a single SKILL.md at the CLI root. This tree now installs every skill under skills/<name>/SKILL.md (commit 71feae7 moved the fiken skill to skills/fiken/SKILL.md, and scripts/check-boundaries.sh's doc-claims check already reads it from there), so \"the bundled SKILL.md\" named a file that does not exist and the first thing a new agent is told to read was a dead end. One string, no behaviour. A reprint that restores the old wording should collide with this record.",
+  "files": [
+    "internal/cli/root.go"
+  ],
+  "call_sites": [
+    "PATCH(root-help-skill-path)",
+    "See README.md or skills/fiken/SKILL.md for recipes."
+  ],
+  "validated_outcome": "make check green (go vet ./..., go test ./..., scripts/check-boundaries.sh). The file skills/fiken/SKILL.md exists in this tree. No behaviour change and no API call."
+}

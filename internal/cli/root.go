@@ -169,7 +169,7 @@ Highlights (not in the official API docs):
 
 Agent mode: add --agent to any command for JSON output + non-interactive mode.
 Health check: run 'fiken-cli doctor' to verify auth and connectivity.
-See README.md or the bundled SKILL.md for recipes.`,
+See README.md or skills/fiken/SKILL.md for recipes.`, // PATCH(root-help-skill-path)
 		SilenceUsage: true,
 		Version:      version,
 	}
