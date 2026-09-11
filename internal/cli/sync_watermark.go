@@ -18,8 +18,16 @@
 //     says nothing: that is the default path doing its job, not a user request
 //     the CLI had to decline, so it gets no resource_not_incremental warning.
 //     --since stays a caller window: it neither reads nor writes the watermark.
-//     --full clears the pair's watermark before refetching, so an interrupted
-//     --full cannot leave a stale mark standing over a half-cleared mirror.
+//     --full clears the watermark of every pair in its scope UP FRONT, in the
+//     same breath as the row delete and before the first request, so an
+//     interrupted --full cannot leave a stale mark standing over a mirror it
+//     had already half-cleared. Clearing per parent as each refetch started
+//     was one clear too late: the pairs the run never reached kept marks for
+//     rows that were already gone, and the next default run windowed straight
+//     over the hole. The per-parent clear survives as a backstop for a parent
+//     row that only appeared during this run, and a clear that FAILS blocks
+//     that pair's advance — a mark this run could not reset is not a mark it
+//     may overwrite from a pull it cannot compare against.
 //
 //   - WHAT GOES ON THE WIRE. The stored timestamp through syncSinceWindowValue,
 //     the same day-floor-minus-one rule --since gets (see sync_since.go for why
@@ -36,16 +44,20 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"fiken-cli/internal/store"
 )
 
 // syncRunStartedAt is the wall-clock start of the sync command currently
-// running, set once in newSyncCmd's RunE. The watermark a completed pull writes
+// running, set once in newSyncCmd's RunE and reset there on the way out, so a
+// later direct walker call in the same process measures against its own walk
+// instead of whichever `sync` command ran before it. The watermark a completed pull writes
 // is this instant, not the moment the pull finished — see the package comment.
 // Zero outside a `sync` invocation (direct walker calls in tests), where the
 // walk's own start time is the honest fallback.
@@ -124,13 +136,113 @@ func syncAdvanceWatermark(db *store.Store, company, resource, stamp string) {
 }
 
 // syncClearWatermark drops the watermark for one (company, resource) ahead of a
-// --full refetch of that pair, so an interrupted run leaves "pull me in full"
-// behind rather than a mark for rows it never fetched.
-func syncClearWatermark(db *store.Store, company, resource string) {
+// --full refetch of that pair, and reports whether the pair is now in the state
+// --full promises: no mark, i.e. "pull me in full".
+//
+// The scope-wide clear above already ran for this pair in an ordinary run; this
+// is the backstop for a parent row that appeared after it (the companies pull
+// of this same run can add one). A false answer is not fatal to the sync, but
+// it is not silent either, and the caller must not advance that pair: the old
+// mark is still standing, and a new one written over a --full pull would claim
+// the two describe the same collection.
+func syncClearWatermark(db *store.Store, syncEvents io.Writer, company, resource string) bool {
 	if db == nil || company == "" || resource == "" {
+		return false
+	}
+	if err := db.ClearSyncWatermark(company, resource); err != nil {
+		emitSyncWatermarkClearFailed(syncEvents, company, resource, err)
+		return false
+	}
+	return true
+}
+
+// syncFullRunWatermarkScope names the resources a --full run must clear the
+// watermarks of. The dependent walker owns every watermarked resource, and it
+// selects what to walk from parentFilter — the --resources list as the user
+// gave it, before the default expansion — so the same selection is made here
+// rather than read off the expanded list, which holds only the flat resources.
+// An empty filter means "walk them all".
+//
+// resources, the expanded flat list, is appended so a named flat resource is
+// still covered if one ever grows a watermark; today none matches a row.
+func syncFullRunWatermarkScope(parentFilter, resources []string) []string {
+	allow := make(map[string]bool, len(parentFilter))
+	for _, name := range parentFilter {
+		allow[name] = true
+	}
+	scope := make([]string, 0, len(resources)+8)
+	scope = append(scope, resources...)
+	for _, dep := range dependentResourceDefs() {
+		if len(allow) > 0 && !allow[dep.ParentTable] && !allow[dep.Name] {
+			continue
+		}
+		scope = append(scope, dep.Name)
+	}
+	return scope
+}
+
+// syncClearFullRunWatermarks drops every watermark a --full run is about to
+// refetch, at the same instant the run deletes the scoped company's rows and
+// before a single request goes out. company is the --company scope, "" for a
+// run that walks every company in the mirror.
+//
+// resources is the list of resource names this run will walk; a name with no
+// watermark (every flat resource, and every endpoint with no temporal filter)
+// simply matches no row.
+func syncClearFullRunWatermarks(db *store.Store, syncEvents io.Writer, company string, resources []string) {
+	if db == nil || len(resources) == 0 {
 		return
 	}
-	_ = db.ClearSyncWatermark(company, resource)
+	removed, err := db.ClearSyncWatermarks(company, resources)
+	if err != nil {
+		emitSyncWatermarkClearFailed(syncEvents, company, strings.Join(resources, ","), err)
+		return
+	}
+	if removed > 0 && humanFriendly {
+		fmt.Fprintf(os.Stderr, "  --full: cleared %d incremental watermark(s) before refetching\n", removed)
+	}
+}
+
+// emitSyncWatermarkClearFailed reports a watermark that --full could not reset.
+// Silence here is the dangerous case: the run goes on to delete and refetch
+// rows while a mark for the old collection stands, so an operator who never
+// sees this cannot know why a later default run skipped a window. Shaped like
+// clearFullSyncCompanyRows' failure line in human mode, and a sync_warning on
+// the event stream otherwise.
+func emitSyncWatermarkClearFailed(syncEvents io.Writer, company, resource string, err error) {
+	if humanFriendly {
+		fmt.Fprintf(os.Stderr, "warning: --full could not clear the %s watermark for %s: %v\n", resource, company, err)
+		return
+	}
+	if syncEvents == nil {
+		return
+	}
+	fmt.Fprintln(syncEvents, syncWatermarkClearWarningJSON(company, resource, err))
+}
+
+// syncWatermarkClearWarningJSON renders the warning as one valid JSON line,
+// with the store's error message escaped rather than pasted in: it can carry
+// quotes, and a broken line on the event stream would cost a reader the event
+// it most needs to parse.
+func syncWatermarkClearWarningJSON(company, resource string, err error) string {
+	payload := struct {
+		Event    string `json:"event"`
+		Resource string `json:"resource"`
+		Company  string `json:"company"`
+		Reason   string `json:"reason"`
+		Message  string `json:"message"`
+	}{
+		Event:    "sync_warning",
+		Resource: resource,
+		Company:  company,
+		Reason:   "watermark_clear_failed",
+		Message:  fmt.Sprintf("--full could not clear the incremental watermark: %v; this pair will not record a new one", err),
+	}
+	line, jsonErr := json.Marshal(payload)
+	if jsonErr != nil {
+		return `{"event":"sync_warning","reason":"watermark_clear_failed"}`
+	}
+	return string(line)
 }
 
 // emitSyncWindow announces that one (company, resource) pull is incremental and

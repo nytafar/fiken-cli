@@ -20,6 +20,7 @@ package store
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 )
 
 // syncWatermarkCreateSQL is the table, run from migrateExtras on every open.
@@ -85,4 +86,46 @@ func (s *Store) ClearSyncWatermark(companySlug, resourceType string) error {
 		companySlug, resourceType,
 	)
 	return err
+}
+
+// ClearSyncWatermarks drops the watermarks for a whole `sync --full` scope in
+// one statement: the named resources for companySlug, or for EVERY company
+// when companySlug is "". It returns the number of rows dropped.
+//
+// The per-pair ClearSyncWatermark above is the lazy form, run as each parent's
+// refetch starts. That is one clear too late for the pairs a run never reaches:
+// `--full --company X` deletes the scoped company's rows before the first
+// request, so a run interrupted after the delete would leave a mark standing
+// over rows it had already removed, and the next default run would window
+// straight over the hole. This clears the whole scope at the same instant as
+// the delete, so the worst an interruption can leave behind is "pull me in
+// full".
+//
+// An empty resourceTypes list is a no-op rather than "every resource": the
+// scope of a --full run is the resources it names, and widening that here would
+// reset pairs the run never intended to refetch.
+func (s *Store) ClearSyncWatermarks(companySlug string, resourceTypes []string) (int64, error) {
+	if len(resourceTypes) == 0 {
+		return 0, nil
+	}
+	query := `DELETE FROM sync_watermark WHERE resource_type IN (?` + strings.Repeat(", ?", len(resourceTypes)-1) + `)`
+	args := make([]any, 0, len(resourceTypes)+1)
+	for _, resource := range resourceTypes {
+		args = append(args, resource)
+	}
+	if companySlug != "" {
+		query += ` AND company_slug = ?`
+		args = append(args, companySlug)
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	res, err := s.db.Exec(query, args...)
+	if err != nil {
+		return 0, err
+	}
+	removed, err := res.RowsAffected()
+	if err != nil {
+		return 0, nil
+	}
+	return removed, nil
 }
