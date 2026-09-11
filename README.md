@@ -185,6 +185,10 @@ fiken-cli companies
 # build the local mirror across your companies (serial + throttled; safe to re-run, resumes)
 fiken-cli sync
 
+# refresh only what changed lately (contacts, journal_entries, transactions,
+# products, sales, invoices, credit_notes; the rest still pull in full)
+fiken-cli sync --since 7d
+
 # the headline question: what isn't matched to the bank yet?
 fiken-cli bank-unverified --company fiken-demo --as-of 2026-05-31
 
@@ -200,6 +204,13 @@ fiken-cli sync --full --company <slug> --resources journal_entries,bank_accounts
 ```
 
 `fiken-cli doctor` names any company still holding stale rows.
+
+`--since` takes a duration (`7d`, `24h`, `1w`, `30m`) and asks Fiken for rows modified since
+then, on the seven resources whose list endpoints accept a date filter: contacts,
+journal_entries, transactions, products, sales, invoices and credit_notes. Every other
+resource has no such filter and is fetched in full, with a `resource_not_incremental`
+warning. `--full` and `--since` are refused together: one refetches every row, the other a
+window.
 
 ## Unique Features
 
