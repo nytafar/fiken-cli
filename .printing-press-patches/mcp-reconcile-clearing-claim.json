@@ -1,0 +1,19 @@
+{
+  "schema_version": 2,
+  "id": "mcp-reconcile-clearing-claim",
+  "applied_at": "2026-09-11",
+  "base_run_id": "20260609-145046",
+  "base_printing_press_version": "4.24.0",
+  "summary": "docs(mcp): correct the reconcile capability claim in the novel-feature index",
+  "reason": "The generated novel-feature index in internal/mcp/tools.go (command_mirror_capabilities and playbook, both seeded from .printing-press.json) advertised that reconcile composes clearing-account journal entries for payment processors. It does not: internal/cli/reconcile.go builds exactly one path, /companies/{slug}/{sales|purchases}/{id}/payments (reconcile.go:65), and optionally marks a sale settled; there is no journal-entry call and no clearing-account handling anywhere in the file. An agent reading the index would call reconcile for a payout and silently end up with the clearing side unbooked. The same index also implied a complete payment surface: reconcile sends no amountInNok, which Fiken requires when the payment amount is not in NOK (spec.yaml payment schema), so foreign-currency payments must go through purchases payments create-purchase. Two literal string edits, each marked with a // PATCH(mcp-reconcile-clearing-claim) comment: the capability description plus its rationale, and the playbook insight. The same claim was corrected in the hand-authored .printing-press.json, skills/fiken/SKILL.md and README.md, and scripts/check-boundaries.sh check (e) now greps all four files for the clearing-account claim shape so a reprint or a copied blurb fails closed.",
+  "files": [
+    "internal/mcp/tools.go"
+  ],
+  "call_sites": [
+    "// PATCH(mcp-reconcile-clearing-claim)",
+    "it posts no clearing-account journal entries",
+    "clearing-account entries for payment processors are not composed"
+  ],
+  "validated_outcome": "make check passes: go vet ./..., go test ./..., and scripts/check-boundaries.sh (marker consistency, vatType prefix lint, patch-record ledger, and the doc-claims grep extended with the clearing-account needle). Claims re-derived by reading internal/cli/reconcile.go and the payment schema in spec.yaml. No API call was made.",
+  "patch_count": 2
+}

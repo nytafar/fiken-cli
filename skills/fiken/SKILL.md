@@ -127,9 +127,9 @@ Shared flags: `--min-impact-ore` drops findings below an absolute øre threshold
   ```bash
   fiken-cli reverse 734083065 --company fiken-demo --dry-run
   ```
-- **`reconcile`** — Registers and settles payments on sales and purchases, including clearing-account journal entries for payment processors.
+- **`reconcile`** — Registers a payment against an open sale or purchase and records it in the audit log.
 
-  _Use when a payout or card settlement needs to be matched to an open sale/purchase and booked to the right clearing account._
+  _Use to settle an open sale or purchase in NOK; it takes no amount in NOK for a foreign-currency payment, so use `purchases payments create-purchase` with `--amount-in-nok` there._
 
   ```bash
   fiken-cli reconcile --sale 2888156 --amount 34000 --account 1920:10001 --dry-run

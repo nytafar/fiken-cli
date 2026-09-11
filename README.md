@@ -1,15 +1,15 @@
 # Fiken CLI
 
 Agent-native Fiken tooling: complete read coverage over a local, searchable mirror — plus the gated, idempotent, audited write and reconciliation layer no other Fiken tool has.
-Reads are a commodity. Every Fiken endpoint is mirrored into local SQLite so an agent can reason over your full accounting history with SQL and full-text search instead of round-tripping a rate-limited API. The read layer is generated and disposable — re-syncable from the API at any time.
+Reads are a commodity. Twelve resources — contacts, journal entries, transactions, purchases, sales, invoices, credit notes, products, projects, accounts, bank accounts and the inbox — are mirrored into local SQLite so an agent can reason over your accounting history with SQL and full-text search instead of round-tripping a rate-limited API. The read layer is generated and disposable — re-syncable from the API at any time.
 
-The write path is not disposable. It touches real books, so it's hand-built around a single rule: **an action against the ledger must be impossible to do twice, impossible to do unrecorded, and possible to undo.** Fiken gives you none of those — no idempotency key, no dry-run, no write audit. This CLI adds all three, plus the error-hunting and reconciliation surface that is the whole reason it exists. Every other Fiken tool stops at read-only; none reconcile, none write safely.
+The write path is not disposable. It touches real books, so it is hand-built around a single rule: **an action against the ledger should be impossible to do twice, impossible to do unrecorded, and possible to undo.** Fiken gives you none of those — no idempotency key, no dry-run, no write audit. Three commands implement the rule today: `commit`, `reconcile` and `reverse`. The generated commands write straight to Fiken, so an agent driving them owns its own audit trail through `log-event`. See the roadmap for the gaps.
 
 ## Two layers
 
 **Reads — generated, disposable.** ~150 Fiken v2 operations as composable, single-purpose commands, plus an MCP server for agents that prefer it. A local SQLite mirror with FTS answers history questions offline, so you don't hammer Fiken's single-concurrent-request limit to find out what a vendor cost last quarter. Delta-synced; rebuildable from the API at will.
 
-**Writes & reconciliation — hand-built, irreplaceable.** Gated, idempotent, date-aligned, and written to an append-only audit log in the same call that makes the change.
+**Writes & reconciliation — hand-built.** `commit`, `reconcile` and `reverse` are gated, date-aligned, and append to the audit log in the same call that makes the change. `commit` alone carries the idempotency map.
 
 ## Reconciliation & error-hunting
 
@@ -31,17 +31,28 @@ Writing to the ledger is a pipeline, not a call:
 - **validate** — the dry-run Fiken lacks: balanced debit/credit, account exists, MVA code plausible, period open, date sane. Structural checks before anything touches the books.
 - **commit** — idempotent (the same bank line or document never double-books), **date-aligned to the bank line** so the posting rendezvous with the waiting line in Fiken's own reconciliation, stamped with an `X-Request-ID`, and audited in the same call.
 - **reverse** — a correcting entry or soft-delete with audit linkage. Mistakes are correctable, not catastrophic.
-- **reconcile** — payment/settle plus clearing-account entries for payment-processor flows.
+- **reconcile** — registers a payment against an open sale or purchase, audited. Clearing-account entries for payment-processor payouts are a roadmap item.
 
 Plus **mva-summary**, **rollup**, and **vendor-profile** — VAT-return-shaped and margin/revenue/cost views read straight off the mirror. Because Fiken holds the books of record while ecommerce analytics see only a subset of revenue, these report the *whole-business* number, not the storefront's projection of it.
 
 ## Design principles
 
 - **The durable assets are the idempotency map and the append-only audit log — not the mirror.** They live in a separate, backed-up store; the mirror is disposable. Structure compounds; a read cache doesn't.
-- **Idempotent by construction.** Fiken has no idempotency key, so the CLI owns one. Every write checks a durable source→entity map first; a re-run is a no-op, never a duplicate posting.
-- **Audited by construction.** Logging is part of the write call, not a separate step you can forget. Every action records its source, rationale, confidence, the Fiken request id, and its result — so any decision is reconstructable and reversible from your own store. The CLI's own writes and the browser reconciliation harness feed the same single log.
+- **Idempotent where it books.** Fiken has no idempotency key, so the CLI owns one. `commit` checks a durable source→entity map first, so re-running the same bank line or document is a no-op rather than a duplicate posting. `reconcile` carries no such map yet: a repeated payment registers twice.
+- **Audited in the three commands that book.** `commit`, `reconcile` and `reverse` append to the log in the same call that writes, recording source, rationale, confidence, the Fiken request id and the result. The append is a separate statement, not one transaction with the remote call, and its error is swallowed: a successful posting can leave no event behind. The generated create/update/delete commands never touch the log at all, so an agent that uses them calls `log-event` itself. The CLI and the browser reconciliation harness feed that same single log.
 - **Agent-native.** Composable commands, an offline searchable mirror, compact/JSON output, built to be called thousands of times a day and driven from Claude Code.
 - **Reconciliation-first.** The bank-line workflow is the point; everything else serves it.
+
+## Roadmap
+
+Known gaps, stated so nothing above reads as a guarantee it is not:
+
+- **Idempotent payments.** `reconcile` consults no source→entity map, so a repeated payment registers twice. It needs a durable key and a reserve/advance lifecycle like `commit`'s.
+- **Payments in foreign currency.** `reconcile` sends no `amountInNok`, which Fiken requires whenever the amount is not in NOK, so those payments go through `purchases payments create-purchase` instead.
+- **Payment-processor clearing.** Payout and card-settlement flows still need their clearing-account journal entries posted by hand; no command composes them.
+- **Crash-safe writes.** A crash between a successful POST and the idempotency advance leaves the row reserved rather than committed, so a retry re-posts and double-books. Closing it needs an outbox or a recovery pass, and the swallowed audit error surfaced.
+- **Audit coverage of the generated commands.** The ~70 generated create/update/delete commands write to Fiken with no local event. Either route them through the audit sink or document each as agent-audited.
+- **Verified mirror coverage.** Twelve resources sync out of 153 operations in `spec.yaml`. The set deserves a coverage report rather than a claim.
 
 ## Install (from source)
 
@@ -282,9 +293,9 @@ These capabilities aren't available in any other tool for this API.
   ```bash
   fiken-cli reverse 734083065 --company fiken-demo --dry-run
   ```
-- **`reconcile`** — Registers and settles payments on sales and purchases, including clearing-account journal entries for payment processors.
+- **`reconcile`** — Registers a payment against an open sale or purchase and records it in the audit log.
 
-  _Use when a payout or card settlement needs to be matched to an open sale/purchase and booked to the right clearing account._
+  _Use to settle an open sale or purchase in NOK; payments in foreign currency and payment-processor clearing entries are roadmap items._
 
   ```bash
   fiken-cli reconcile --sale 2888156 --amount 34000 --account 1920:10001 --dry-run

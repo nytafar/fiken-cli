@@ -158,12 +158,12 @@ DOC_FILES=(.printing-press.json skills/fiken/SKILL.md README.md internal/mcp/too
 doc_bad=()
 while IFS= read -r hit; do
 	[ -n "$hit" ] && doc_bad+=("$hit")
-done < <(grep -nE 'debit≠credit|debit/credit imbalance|by project|project, or contact' "${DOC_FILES[@]}" |
-	grep -vE 'is not checked|not computable|balanced debit/credit' |
+done < <(grep -niE 'debit≠credit|debit/credit imbalance|by project|project, or contact|clearing-account' "${DOC_FILES[@]}" |
+	grep -viE 'is not checked|not computable|balanced debit/credit|roadmap|posts no clearing-account|not composed|posted by hand' |
 	cut -c1-140 || true)
 
 if [ ${#doc_bad[@]} -gt 0 ]; then
-	echo "FAIL: doc claims — drift does not check debit≠credit imbalance, and rollup has no project dimension:"
+	echo "FAIL: doc claims — drift does not check debit≠credit imbalance, rollup has no project dimension, and reconcile posts no clearing-account entries:"
 	printf '  %s\n' "${doc_bad[@]}"
 	fail=1
 else

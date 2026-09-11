@@ -105,7 +105,7 @@
     {
       "name": "Payment reconciliation",
       "command": "reconcile",
-      "description": "Registers and settles payments on sales and purchases, including clearing-account journal entries for payment processors."
+      "description": "Registers a payment against an open sale or purchase in NOK, optionally marking a sale settled, and records it in the audit log."
     },
     {
       "name": "Audit event sink",
