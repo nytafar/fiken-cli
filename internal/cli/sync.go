@@ -231,6 +231,16 @@ Resource scoping:
 
 			// Enqueue all resources
 			for _, resource := range resources {
+				// PATCH(sync-named-dependents): a name the dependent pass owns
+				// is not the flat pool's work (issue #14). Naming a dependent
+				// in --resources sets both `resources` and `parentFilter`, so
+				// the flat pool ran it too, failed in syncResourcePath (the
+				// only flat resource is `companies`) and returned an unnamed
+				// error: the summary reported twice the resources and half of
+				// them errored while the dependent pass synced them all.
+				if isDependentSyncResource(resource) {
+					continue
+				}
 				work <- resource
 			}
 			close(work)
@@ -404,6 +414,13 @@ func syncResource(ctx context.Context, c interface {
 
 	path, err := syncResourcePath(resource)
 	if err != nil {
+		// PATCH(sync-named-dependents): the one error path that returned
+		// without emitting an event, so a machine-mode consumer saw an
+		// anonymous failure in the summary and nothing else (issue #14). A
+		// name that is neither flat nor dependent reaches here; say which.
+		if !humanFriendly {
+			fmt.Fprintln(syncEvents, syncErrorJSON(resource, "", err))
+		}
 		return syncResult{Resource: resource, Err: err, Duration: time.Since(started)}
 	}
 
