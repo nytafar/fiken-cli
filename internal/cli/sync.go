@@ -2024,6 +2024,19 @@ func syncDependentResource(ctx context.Context, c interface {
 			}
 
 			if len(items) == 0 {
+				// PATCH(sync-full-deletes): only a body that really IS an empty
+				// collection may end this walk comparably. The flat walker has
+				// tested isEmptyPageResponse here since it was printed (:663);
+				// this one broke on ANY zero-item body — a bare object, `null`,
+				// an unrecognised envelope — and left parentTruncated false with
+				// an empty landed set. Beside a Fiken-Api-Result-Count of 0 that
+				// reads as "the collection is empty and the walk saw all of it",
+				// and the deletion pass then takes every row of that (company,
+				// resource). A body this walker could not read is exactly the
+				// case where an absent row proves nothing (issue #17).
+				if !isEmptyPageResponse(data) {
+					parentTruncated = true
+				}
 				break
 			}
 
