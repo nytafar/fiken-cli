@@ -20,7 +20,7 @@ If no receipt exists, park the line with reason `mangler bilag`. Do not book.
    `purchases get --date-ge/--date-le` (create returns no id).
    If the purchase already exists unpaid, register the payment instead:
    `fiken-cli purchases payments create-purchase <slug> <purchaseId> --date <linje.dato> --account 1920:10001 --amount <øre>` (for a foreign-currency purchase add `--currency <ccy> --amount-in-nok <linjeBelop øre>`; Fiken posts the rate difference to 8160 itself).
-3. **Attach the receipt**: `fiken-cli purchases attachments add-to-purchase <slug> <purchaseId> --file <pdf> --attach-to-sale`
+3. **Attach the receipt**: `fiken-cli purchases attachments add-to-purchase <slug> <purchaseId> --file <pdf> --filename <name>.pdf --attach-to-sale`
    (`--attach-to-sale` is the flag for a supplier purchase).
 4. **Delete the inbox document**: `fiken-cli inbox delete-document <slug> <documentId> --agent`.
    The attachment is a separate file and survives. An undeleted inbox document keeps the
