@@ -181,6 +181,14 @@ Resource scoping:
 				// Only ever runs with an explicit --company, one named resource at a
 				// time; an unscoped --full keeps the printed behaviour.
 				clearFullSyncCompanyRows(db, resources)
+				// PATCH(sync-watermark): and the incremental watermarks of the
+				// pairs this run will refetch, in the same breath as the delete
+				// and before the first request (issue #22). Clearing them per
+				// parent as each refetch started was one clear too late: a run
+				// interrupted after the delete left a mark standing for rows it
+				// had already removed, and the next default run windowed over
+				// the hole for good.
+				syncClearFullRunWatermarks(db, syncEventWriter, syncCompanyScope, syncFullRunWatermarkScope(parentFilter, resources))
 			}
 
 			if cliutil.IsDogfoodEnv() && !cmd.Flags().Changed("max-pages") {
@@ -246,6 +254,10 @@ Resource scoping:
 			// stamped when the walk ENDED would exclude everything modified
 			// during it, and nothing would ever fetch those rows again.
 			syncRunStartedAt = started
+			// PATCH(sync-watermark): and only for this run. Left standing, it
+			// makes a later walker call in the same process stamp a mark from
+			// whichever `sync` ran before it.
+			defer func() { syncRunStartedAt = time.Time{} }()
 			work := make(chan string, len(resources))
 			results := make(chan syncResult, len(resources))
 
@@ -1965,10 +1977,18 @@ func syncDependentResource(ctx context.Context, c interface {
 			parentPull = newSyncPullWindow(depSinceParam, mark, userParams, dep.Name, true)
 			emitSyncWindow(syncEvents, dep.Name, parentID, mark)
 		}
+		// PATCH(sync-watermark): the scope-wide clear in RunE already dropped
+		// this pair's mark before the first request; this covers a parent row
+		// that only appeared after it (this run's own companies pull can add
+		// one). A clear that fails leaves the old mark standing, so this pair
+		// may not record a new one either.
+		parentWatermarkBlocked := false
 		if full {
 			// The old mark cannot survive the refetch it is about to be
 			// replaced by: an interrupted --full must leave "pull me in full".
-			syncClearWatermark(db, parentID, dep.Name)
+			if !syncClearWatermark(db, syncEvents, parentID, dep.Name) {
+				parentWatermarkBlocked = true
+			}
 		}
 		if parentPull.Windowed {
 			depAnyParentWindowed = true
@@ -1978,6 +1998,12 @@ func syncDependentResource(ctx context.Context, c interface {
 		// result-count arithmetic. A watermark may only move over a pull that
 		// had none.
 		parentFailed := false
+		// PATCH(sync-watermark): rows this walk fetched and then dropped —
+		// all_items_failed_id_extraction and primary_key_unresolved. The walk
+		// itself was not truncated, so the flag is its own: those rows did not
+		// land, and nothing will fetch them again if the mark moves past them.
+		// Without Fiken-Api-Result-Count there is no mismatch to catch it.
+		parentRowsDropped := false
 
 		for {
 			params := map[string]string{}
@@ -2133,6 +2159,12 @@ func syncDependentResource(ctx context.Context, c interface {
 			depLanded.addBatch(dep.Name, items) // PATCH(pagination-headers)
 			depConsumedTotal += len(items)
 			depExtractFailureTotal += extractFailures
+			// PATCH(sync-watermark): recorded outside the emit gate below —
+			// only the FIRST anomaly of a resource is reported, but every one
+			// of them dropped rows from this parent's pull.
+			if stored < len(items) {
+				parentRowsDropped = true
+			}
 			// Order matches the flat path (syncResource): all-fail first,
 			// then partial-fail. The all-fail case dominates — if stored==0
 			// with at least one item, the resource is broken regardless of
@@ -2156,6 +2188,12 @@ func syncDependentResource(ctx context.Context, c interface {
 			totalCount += stored
 			if resourceSupportsPagination(dep.Name) && nextCursor == "" && pageSize.cursorParam != "offset" && len(items) >= pageSize.limit && pageMayHaveMore(data) {
 				emitSyncMissingPaginationCursorWarning(syncEvents, humanFriendly, dep.Name, parentID)
+				// PATCH(sync-watermark): a full page the API says has more
+				// behind it, and no cursor to reach it with, is a prefix of the
+				// collection. Whether the loop then stops here depends on
+				// determinePaginationDefaults' cursor type; the completeness of
+				// the pull must not (issue #22).
+				parentTruncated = true
 			}
 			pagesFetched++
 
@@ -2198,6 +2236,10 @@ func syncDependentResource(ctx context.Context, c interface {
 				} else {
 					// A cursor-based API reporting has_more without a next cursor
 					// cannot advance safely; stop instead of looping silently.
+					// PATCH(sync-watermark): and say that the walk stopped short
+					// of the collection, so the watermark cannot move past the
+					// pages this cursor never reached (issue #22).
+					parentTruncated = true
 					break
 				}
 			}
@@ -2221,11 +2263,13 @@ func syncDependentResource(ctx context.Context, c interface {
 		// which is the last input the watermark needs (issue #22). Everything
 		// this run asked Fiken for landed for this (company, resource): no
 		// transport or access error, no truncation (cap, stuck cursor, upsert
-		// failure, unreadable body), and — where the API said how many rows the
-		// window held — exactly that many distinct rows. Anything less leaves
-		// the watermark alone and costs one more full pull next time, which is
-		// the only direction that cannot lose a row.
-		if depWatermarkMayAdvance && !parentFailed && !parentTruncated && !parentCountMismatch {
+		// failure, unreadable body, a full page with no cursor behind it), no
+		// row fetched and then dropped for want of a primary key, a --full
+		// clear that actually cleared, and — where the API said how many rows
+		// the window held — exactly that many distinct rows. Anything less
+		// leaves the watermark alone and costs one more full pull next time,
+		// which is the only direction that cannot lose a row.
+		if depWatermarkMayAdvance && !parentFailed && !parentTruncated && !parentCountMismatch && !parentRowsDropped && !parentWatermarkBlocked {
 			syncAdvanceWatermark(db, parentID, dep.Name, depWatermarkStamp)
 		}
 		// PATCH(sync-full-deletes): the mirror had no way to lose a row Fiken

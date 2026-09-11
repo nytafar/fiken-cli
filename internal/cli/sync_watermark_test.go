@@ -17,11 +17,13 @@ package cli
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -42,6 +44,12 @@ type companyServer struct {
 	// claimed overrides the Fiken-Api-Result-Count for a company; absent means
 	// "claim exactly what is served", i.e. a pull with no mismatch.
 	claimed map[string]int
+	// noResultCount serves the page WITHOUT Fiken-Api-Result-Count, the shape
+	// that leaves the walk with nothing to compare its rows against.
+	noResultCount bool
+	// failStatus is the status failFor answers with; 0 means 500. A 4xx is the
+	// fast one — the client retries a 500 three times with a backoff.
+	failStatus int
 
 	mu       sync.Mutex
 	requests map[string][]url.Values
@@ -65,7 +73,11 @@ func (s *companyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 
 	if s.failFor[slug] {
-		http.Error(w, `{"message":"boom"}`, http.StatusInternalServerError)
+		status := s.failStatus
+		if status == 0 {
+			status = http.StatusInternalServerError
+		}
+		http.Error(w, `{"message":"boom"}`, status)
 		return
 	}
 
@@ -110,7 +122,9 @@ func (s *companyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set(client.HeaderPage, strconv.Itoa(page))
 	w.Header().Set(client.HeaderPageSize, strconv.Itoa(size))
 	w.Header().Set(client.HeaderPageCount, strconv.Itoa(pageCount))
-	w.Header().Set(client.HeaderResultCount, strconv.Itoa(claimed))
+	if !s.noResultCount {
+		w.Header().Set(client.HeaderResultCount, strconv.Itoa(claimed))
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write(body)
 }
@@ -592,5 +606,248 @@ func TestSync_DefaultRunWindowsTheSecondPass(t *testing.T) {
 	t.Cleanup(func() { _ = reopened.Close() })
 	if got, err := reopened.CountCompanyResources("contacts", "testco"); err != nil || got != 2 {
 		t.Fatalf("contacts rows for testco = (%d, %v), want (2, nil): an incremental run must not drop unchanged rows", got, err)
+	}
+}
+
+// TestSyncDependentResource_DroppedRowsKeepTheWatermarkPut: the page landed,
+// every row on it was dropped for want of an extractable primary key, and the
+// API sent no Fiken-Api-Result-Count to catch the shortfall with. Advancing
+// there would mark the window pulled and nothing would ever fetch those rows
+// again — the anomaly is reported, so the mark must stay put.
+func TestSyncDependentResource_DroppedRowsKeepTheWatermarkPut(t *testing.T) {
+	pinRunStart(t, time.Time{})
+	db := openTestStore(t)
+	seedCompanies(t, db, "testco")
+	cs := &companyServer{
+		// Scalars: the item shape the all_items_failed_id_extraction anomaly
+		// was written for. There is no field to read a primary key from, so
+		// every row on the page is consumed and then dropped.
+		rows:          map[string][]string{"testco": {`"nameless one"`, `42`}},
+		noResultCount: true,
+	}
+	c := newCompanyServer(t, cs)
+
+	var events bytes.Buffer
+	if res := syncDependentResource(context.Background(), c, db, contactsDep(), "", false, 0, false, nil, &events); res.Err != nil {
+		t.Fatalf("syncDependentResource: %v", res.Err)
+	}
+
+	if anomalies := countAnomalies(t, events.String(), "all_items_failed_id_extraction"); len(anomalies) != 1 {
+		t.Fatalf("got %d all_items_failed_id_extraction anomalies, want 1\n%s", len(anomalies), events.String())
+	}
+	if strings.Contains(events.String(), `"reason":"result_count_mismatch"`) {
+		t.Fatalf("the server sent no Fiken-Api-Result-Count, so nothing could have caught the drop:\n%s", events.String())
+	}
+	if got := db.SyncWatermark("testco", "contacts"); got != "" {
+		t.Fatalf("watermark = %q after a pull that dropped every row it fetched, want none recorded", got)
+	}
+}
+
+// TestSyncDependentResource_FailedFullClearBlocksTheAdvance: --full may only
+// write a mark it was able to reset first. A DELETE the store refuses leaves
+// the old mark standing over rows this run was about to refetch; stamping a
+// fresh one on top would claim the two describe the same collection. The run
+// says so on the event stream rather than swallowing the error.
+func TestSyncDependentResource_FailedFullClearBlocksTheAdvance(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "blocked.db")
+	db, closeDB := openStoreAt(t, dbPath)
+	defer closeDB()
+	seedCompanies(t, db, "testco")
+	old := time.Date(2026, 1, 2, 9, 0, 0, 0, time.UTC).Format(time.RFC3339)
+	if err := db.SetSyncWatermark("testco", "contacts", old); err != nil {
+		t.Fatalf("SetSyncWatermark: %v", err)
+	}
+	refuseWatermarkDeletes(t, dbPath)
+
+	cs := &companyServer{rows: map[string][]string{"testco": contactRowsFor("testco", 2)}}
+	c := newCompanyServer(t, cs)
+
+	var events bytes.Buffer
+	if res := syncDependentResource(context.Background(), c, db, contactsDep(), "", true, 0, false, nil, &events); res.Err != nil {
+		t.Fatalf("syncDependentResource --full: %v", res.Err)
+	}
+
+	warns := warningsWithReason(events.String(), "watermark_clear_failed")
+	if len(warns) != 1 {
+		t.Fatalf("got %d watermark_clear_failed warnings, want 1\n%s", len(warns), events.String())
+	}
+	if warns[0]["company"] != "testco" || warns[0]["resource"] != "contacts" {
+		t.Fatalf("watermark_clear_failed = %v, want the testco/contacts pair", warns[0])
+	}
+	if got := db.SyncWatermark("testco", "contacts"); got != old {
+		t.Fatalf("watermark = %q after a --full whose clear failed, want the untouched %q", got, old)
+	}
+}
+
+// TestSync_FullClearsWatermarksItNeverGetsToRefetch is the interrupted --full.
+// The run deletes the scoped company's rows for every named resource up front,
+// then its FIRST resource fails — here the companies pull, which also empties
+// the parent table the dependent walker reads — so contacts is never walked at
+// all. The rows are gone; if the mark for that pair survived, the next default
+// run would ask only for what changed since it and the deleted rows would be
+// missing from the mirror for good.
+func TestSync_FullClearsWatermarksItNeverGetsToRefetch(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", home+"/.config")
+
+	cs := &companyServer{rows: map[string][]string{"testco": contactRowsFor("testco", 3)}}
+	srv := httptest.NewServer(cs)
+	t.Cleanup(srv.Close)
+	t.Setenv("FIKEN_BASE_URL", srv.URL)
+	t.Setenv("FIKEN_API_TOKEN", "test-token")
+
+	dbPath := home + "/data.db"
+	db, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	if _, _, err := db.UpsertBatch("companies", []json.RawMessage{
+		json.RawMessage(`{"slug":"testco","name":"Test Company","testCompany":true}`),
+		json.RawMessage(`{"slug":"othercorp","name":"Other Corp"}`),
+	}); err != nil {
+		t.Fatalf("seed companies: %v", err)
+	}
+	othermark := time.Date(2026, 1, 2, 9, 0, 0, 0, time.UTC).Format(time.RFC3339)
+	if err := db.SetSyncWatermark("othercorp", "contacts", othermark); err != nil {
+		t.Fatalf("SetSyncWatermark(othercorp): %v", err)
+	}
+	_ = db.Close()
+
+	prevScope := syncCompanyScope
+	t.Cleanup(func() { syncCompanyScope = prevScope })
+
+	run := func(args ...string) {
+		syncCompanyScope = ""
+		var out bytes.Buffer
+		cmd := newSyncCmd(&rootFlags{timeout: 10 * time.Second, dataSource: "auto"})
+		cmd.SetOut(&out)
+		cmd.SetErr(&bytes.Buffer{})
+		cmd.SilenceUsage = true
+		cmd.SilenceErrors = true
+		cmd.SetArgs(append([]string{"--db", dbPath}, args...))
+		// A failing run is the point of the second call; the mirror state it
+		// leaves behind is what this test is about, not its exit code.
+		_ = cmd.Execute()
+	}
+
+	// A first, healthy default run fills the pair: rows in the mirror and a
+	// watermark saying "everything up to here has been pulled".
+	run("--company", "testco", "--resources", "contacts")
+	seeded, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	if got, err := seeded.CountCompanyResources("contacts", "testco"); err != nil || got != 3 {
+		t.Fatalf("contacts rows after the seeding run = (%d, %v), want (3, nil)", got, err)
+	}
+	if got := seeded.SyncWatermark("testco", "contacts"); got == "" {
+		t.Fatalf("the seeding run left no watermark; the test cannot show one being cleared")
+	}
+	_ = seeded.Close()
+
+	// Now the interruption. The parent table is empty — the state a mirror is
+	// in when an earlier companies pull failed, or when this one is about to —
+	// and /companies answers 404, so the first resource of this run fails and
+	// nothing restores it. clearFullSyncCompanyRows still deletes testco's
+	// contacts rows up front, and the contacts walker, with no parent to walk,
+	// returns before it ever reaches its own per-parent clear.
+	emptyParentTable(t, dbPath)
+	cs.failFor = map[string]bool{"": true}
+	cs.failStatus = http.StatusNotFound
+	requestsBefore := len(cs.queriesFor("testco"))
+	run("--company", "testco", "--full", "--resources", "companies,contacts")
+
+	if got := len(cs.queriesFor("testco")) - requestsBefore; got != 0 {
+		t.Fatalf("%d contacts request(s) reached testco on the interrupted --full; the pair was supposed to go untouched", got)
+	}
+	reopened, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	if got, err := reopened.CountCompanyResources("contacts", "testco"); err != nil || got != 0 {
+		t.Fatalf("contacts rows after --full = (%d, %v), want (0, nil): --full deletes before it refetches", got, err)
+	}
+	if got := reopened.SyncWatermark("testco", "contacts"); got != "" {
+		t.Fatalf("watermark after an interrupted --full = %q, want none: the rows it marks as pulled were deleted by this same run", got)
+	}
+	if got := reopened.SyncWatermark("othercorp", "contacts"); got != othermark {
+		t.Fatalf("othercorp watermark = %q, want the untouched %q: --full --company testco clears one company's marks, not the mirror's", got, othermark)
+	}
+}
+
+// emptyParentTable removes every companies row from the mirror, leaving the
+// dependent walker with no parent to walk — and no occasion to clear a
+// watermark — while the rows those watermarks describe are deleted anyway.
+func emptyParentTable(t *testing.T, path string) {
+	t.Helper()
+	conn, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open raw sqlite: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+	if _, err := conn.Exec(`DELETE FROM resources WHERE resource_type = 'companies'`); err != nil {
+		t.Fatalf("emptying the companies rows: %v", err)
+	}
+}
+
+// openStoreAt opens a store at a fixed path, so a test can reach the same file
+// with a second connection.
+func openStoreAt(t *testing.T, path string) (*store.Store, func()) {
+	t.Helper()
+	db, err := store.Open(path)
+	if err != nil {
+		t.Fatalf("open store at %s: %v", path, err)
+	}
+	return db, func() { _ = db.Close() }
+}
+
+// refuseWatermarkDeletes makes every DELETE on sync_watermark fail, which is
+// the only honest way to test the failure branch: the store's own clear has no
+// seam, and dropping the table would make the write fail too and prove nothing
+// about the clear. Inserts and updates keep working, so the OLD mark is still
+// there for the assertion.
+func refuseWatermarkDeletes(t *testing.T, path string) {
+	t.Helper()
+	conn, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open raw sqlite: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+	if _, err := conn.Exec(`CREATE TRIGGER refuse_watermark_delete BEFORE DELETE ON sync_watermark
+		BEGIN SELECT RAISE(ABORT, 'watermark deletes are refused by this test'); END`); err != nil {
+		t.Fatalf("install refusing trigger: %v", err)
+	}
+}
+
+// TestSync_RunStartIsScopedToTheRun: the run-start global a completed pull
+// stamps belongs to one `sync` invocation. Left standing after it, the next
+// walker call in the same process — a later test, or a second command in one
+// long-lived process — would stamp a mark from a run that ended long ago, and
+// which test ran first would decide what the mirror recorded.
+func TestSync_RunStartIsScopedToTheRun(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", home+"/.config")
+
+	srv := httptest.NewServer(&companyServer{})
+	t.Cleanup(srv.Close)
+	t.Setenv("FIKEN_BASE_URL", srv.URL)
+	t.Setenv("FIKEN_API_TOKEN", "test-token")
+
+	pinRunStart(t, time.Time{})
+	cmd := newSyncCmd(&rootFlags{timeout: 10 * time.Second, dataSource: "auto"})
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SilenceUsage = true
+	cmd.SilenceErrors = true
+	cmd.SetArgs([]string{"--db", home + "/data.db", "--resources", "companies"})
+	// An empty mirror makes every dependent warn; the exit code is not the
+	// point, the global left behind is.
+	_ = cmd.Execute()
+
+	if !syncRunStartedAt.IsZero() {
+		t.Fatalf("syncRunStartedAt = %s after the command returned, want the zero value", syncRunStartedAt)
 	}
 }
