@@ -1,7 +1,7 @@
 # Flow: innbetaling, Vipps- and Stripe-oppgjør
 
 Recognise: positive `linjeBelop`. Filter with `--kun-innbetalinger true`. Read the suggestion
-text with `show`; the wording decides the branch. Verified live 2026-09-11 on `nyta`.
+text with `show`; the wording decides the branch. Verified live 2026-09-11.
 
 | Suggestion text | Meaning | Action |
 |---|---|---|
@@ -22,7 +22,7 @@ text with `show`; the wording decides the branch. Verified live 2026-09-11 on `n
 
 ## Supplier refund (credit note)
 
-Verified 2026-09-11: Agentic Engineer refunded USD 199, bank line +1 798,94 on 27.05.2026.
+Verified 2026-09-11 on a refund in USD that arrived as a NOK bank line.
 
 1. Find the original purchase (`purchases get`, match supplier or description and the
    currency amount); take its `account` and `vatType`.

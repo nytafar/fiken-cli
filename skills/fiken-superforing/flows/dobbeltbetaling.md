@@ -5,7 +5,7 @@ steder` with radio candidates instead of `OK, gå til neste`. Typically a card a
 plus a manual giro (the giro `tekst` carries a KID built on the invoice number). The next
 invoice from the supplier shows `Paid` equal to its total and `To Pay 0.00`.
 
-Verified live 2026-09-11, Servetheworld 11.05.2026, two lines of -173,75.
+Verified live 2026-09-11 on two lines with the same supplier, date and amount.
 
 1. **First line** is the payment already booked on the original purchase. Its candidate is
    that purchase's payment transaction.

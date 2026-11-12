@@ -10,7 +10,7 @@ Public fees and interest (`Forsinkelsesrenter`, Skatteetaten) come without a doc
 Book them from precedent: search the mirror
 (`sqlite3 ~/.local/share/fiken-cli/data.db` on `journal_entries` JSON, `description like
 '%forsinkelse%'`, same company) and reuse its account and contact, no attachment. Nyta:
-supplier purchase on `8159`, `vatType NONE`, contact Skatteetaten (supplier 20087).
+supplier purchase on `8159`, `vatType NONE`, contact Skatteetaten.
 
 **No receipt in the inbox.** Look where the supplier sent it before giving up:
 

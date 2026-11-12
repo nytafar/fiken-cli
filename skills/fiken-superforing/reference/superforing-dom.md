@@ -1,6 +1,6 @@
 # Superføring DOM reference
 
-Shared by every surface. Verified live 2026-09-11 on company `nyta`.
+Shared by every surface. Verified live 2026-09-11.
 
 ## URL
 
