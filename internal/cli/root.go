@@ -157,14 +157,16 @@ Highlights (not in the official API docs):
   • commit   Posts a validated purchase or journal entry through a guarded path: deduped against the idempotency map, date-aligned to the expected bank-line date, X-Request-ID stamped, and recorded in an append-o…
   • drift   Scans journal entries for debit≠credit imbalances and sub-krone øreavrunding drift using exact integer-øre arithmetic.
   • vat-anomaly   Flags sale/purchase lines whose VAT code is implausible for the account or deviates from how that vendor is usually posted.
-  • mva-summary   Reconstructs a VAT-return-shaped view from local lines: net basis and output/input VAT bucketed per VAT code, for any period.
+  • mva-summary   Reconstructs a VAT-return-shaped view from local lines: net basis and output/input VAT bucketed per VAT code, credit notes subtracted, checked against the ledger's VAT accounts, for any period.
   • rollup   Grouped revenue/cost/margin rollups over the local mirror by month, account, project, or contact.
   • prepare   Turns an inbox document into a structured posting proposal: pulls the bilag, the vendor's posting history, candidate accounts, and the valid MVA codes in one call.
   • reverse   Reverses a posting with a correcting entry or soft-delete, recording the link back to the original in the audit log.
   • duplicates   Surfaces suspected double-postings: the same contact and øre amount within a date window across purchases and sales.
   • reconcile   Registers and settles payments on sales and purchases, including clearing-account journal entries for payment processors.
   • log-event   Appends a grammar-validated event to the append-only audit log; warns on an unknown operation name but never rejects.
-  • missing-bilag   Lists postings in a period that have no attached documentation (empty attachments).
+  • missing-bilag   Lists the postings in a period that need their own bilag and have none: purchases, sales and free postings. Payments, settlements, salary and system entries are counted per class, not reported.
+  • mva-status   Shows which MVA terms are delivered, paid, open or overdue, with due dates, amounts and what sits on the VAT accounts; --date says whether a date's term is closed.
+  • recurring-gaps   Lists suppliers booked month after month that have a month with no purchase, with the usual amount and the last booking: where an unbooked subscription hides.
   • vendor-profile   Shows how a vendor is usually posted: the modal account and VAT code, with frequency and last-used.
 
 Agent mode: add --agent to any command for JSON output + non-interactive mode.
