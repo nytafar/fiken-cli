@@ -1,39 +1,36 @@
 # Fiken CLI
 
-Agent-native Fiken tooling: complete read coverage over a local, searchable mirror — plus the gated, idempotent, audited write and reconciliation layer no other Fiken tool has.
-Reads are a commodity. Twelve resources — contacts, journal entries, transactions, purchases, sales, invoices, credit notes, products, projects, accounts, bank accounts and the inbox — are mirrored into local SQLite so an agent can reason over your accounting history with SQL and full-text search instead of round-tripping a rate-limited API. The read layer is generated and disposable — re-syncable from the API at any time.
+Norsk versjon: [README.no.md](README.no.md)
 
-The write path is not disposable. It touches real books, so it is hand-built around a single rule: **an action against the ledger should be impossible to do twice, impossible to do unrecorded, and possible to undo.** Fiken gives you none of those — no idempotency key, no dry-run, no write audit. Three commands implement the rule today: `commit`, `reconcile` and `reverse`. The generated commands write straight to Fiken, so an agent driving them owns its own audit trail through `log-event`. See the roadmap for the gaps.
+Tooling for running Fiken books together with an AI agent. You keep the decisions: which
+term to close, which receipt belongs to which charge, when to deliver. The agent does the
+legwork through `fiken-cli` and two skills, and everything it writes is checked against the
+bank line and logged.
 
-## Two layers
+It has three parts:
 
-**Reads — generated, disposable.** ~150 Fiken v2 operations as composable, single-purpose commands, plus an MCP server for agents that prefer it. A local SQLite mirror with FTS answers history questions offline, so you don't hammer Fiken's single-concurrent-request limit to find out what a vendor cost last quarter. Delta-synced; rebuildable from the API at will.
+- **A local mirror of your books.** Twelve resources per company are synced into SQLite, so
+  questions about history are answered offline, with SQL and full-text search, instead of
+  through a rate-limited API.
+- **Checks and views on top of the mirror.** Rounding drift, VAT codes that deviate from a
+  supplier's pattern, duplicates, missing documentation, a VAT-return-shaped summary, and
+  revenue, cost and margin rollups.
+- **Bank-line matching in Superføring.** Fiken's own matching panel has no API. The
+  `fiken-superforing` skill drives it in your browser while you watch: it reads the open
+  lines, books paid purchases from them with the receipt attached, and confirms them.
 
-**Writes & reconciliation — hand-built.** `commit`, `reconcile` and `reverse` are gated, date-aligned, and append to the audit log in the same call that makes the change. `commit` alone carries the idempotency map.
+## What you use it for
 
-## Reconciliation & error-hunting
+| You want to | Ask the agent | It uses |
+| --- | --- | --- |
+| Know which bank lines are open and what lacks a receipt | "What is open in the bank for July and August?" | `fiken-superforing`, triage: reads and reports, writes nothing |
+| Book what the bank shows | "Book and confirm those lines" | `fiken-superforing`: one paid purchase per line, receipt attached, line confirmed |
+| Find errors before a VAT return | "Sweep July and August for errors" | `drift`, `vat-anomaly`, `duplicates`, `missing-bilag` |
+| See the VAT figure before you deliver | "What will the return for the term show?" | `mva-summary`, reconciled against the ledger |
+| Look up how a supplier is usually booked | "How do we book this vendor?" | `vendor-profile`, the mirror |
+| See revenue, cost or margin for a period | "Margin per month this year" | `rollup` |
 
-The surface no Fiken tool has, built around bankavstemming — the most-cited Fiken pain there is — all read-only and answered from the local mirror:
-
-- **bank-unverified** — ledger-vs-reconciled-balance gaps and postings dated after the reconciled point: *which accounts have drifted and need a session.*
-- **drift** — sub-krone øre-rounding drift, header-vs-lines totals and VAT-regime breaches, exact integer-øre.
-- **vat-anomaly** — MVA codes implausible for the account, or off the vendor's usual pattern.
-- **duplicates** — same vendor + øre amount within N days.
-- **missing-bilag** — purchases and journal entries with no attached documentation, ranked by amount.
-
-`bank-unverified` is the API-side health signal — it tells you where to look. The line-by-line matching itself runs through the browser **Superføring** workflow, which uses this CLI's idempotent `commit` and records into its audit log. The CLI owns the books-side correctness; the browser harness owns the bank-line UI.
-
-## The gated write path
-
-Writing to the ledger is a pipeline, not a call:
-
-- **prepare** — an inbox document becomes a posting proposal: the original bilag, the vendor's posting history, candidate accounts, plausible MVA codes.
-- **validate** — the dry-run Fiken lacks: balanced debit/credit, account exists, MVA code plausible, period open, date sane. Structural checks before anything touches the books.
-- **commit** — idempotent (the same bank line or document never double-books), **date-aligned to the bank line** so the posting rendezvous with the waiting line in Fiken's own reconciliation, stamped with an `X-Request-ID`, and audited in the same call.
-- **reverse** — a correcting entry or soft-delete with audit linkage. Mistakes are correctable, not catastrophic.
-- **reconcile** — registers a payment against an open sale or purchase, audited. Clearing-account entries for payment-processor payouts are a roadmap item.
-
-Plus **mva-summary**, **rollup**, and **vendor-profile** — VAT-return-shaped and margin/revenue/cost views read straight off the mirror. Because Fiken holds the books of record while ecommerce analytics see only a subset of revenue, these report the *whole-business* number, not the storefront's projection of it.
+You deliver the VAT return yourself in Fiken. The tooling prepares the books for it.
 
 ## Install
 
@@ -42,72 +39,117 @@ curl -fsSL https://raw.githubusercontent.com/nytafar/fiken-cli/main/install.sh |
 npx skills add nytafar/fiken-cli --skill '*' --agent claude-code --global
 ```
 
-The first line installs the latest release binary into `~/.local/bin` (checksum-verified). The second installs both agent skills, `fiken` and `fiken-superforing`, through [`npx skills`](https://skills.sh/). Add `--with-mcp` after `bash -s --` for the MCP server, `--from-source` to build from a clone. Details, other agents and Windows: [docs/install.md](docs/install.md).
+The first line installs the latest release binary into `~/.local/bin`, checksum-verified.
+The second installs both skills, `fiken` and `fiken-superforing`, through
+[`npx skills`](https://skills.sh/).
 
-Auth is a personal API token from Fiken (Settings -> API), exported as `FIKEN_API_TOKEN`; OAuth2 via `fiken-cli auth login` for acting on behalf of other companies. Every write is refused unless the company is a Fiken test company; real books need `FIKEN_MODE=live` in an untracked env file, never a flag. See [docs/configuration.md](docs/configuration.md).
-
-## Quick start
-
-```bash
-# verify auth + connectivity (set FIKEN_API_TOKEN first, or run 'fiken-cli auth login' for OAuth2)
-fiken-cli doctor
-
-# find your companySlug — every analytical command is scoped to it
-fiken-cli companies
-
-# build the local mirror across your companies (serial + throttled; safe to re-run,
-# resumes, and after the first run asks only for what changed per company)
-fiken-cli sync
-
-# refresh only what changed lately (contacts, journal_entries, transactions,
-# products, sales, invoices, credit_notes; the rest still pull in full)
-fiken-cli sync --since 7d
-
-# the headline question: what isn't matched to the bank yet?
-fiken-cli bank-unverified --company fiken-demo --as-of 2026-05-31
-
-# find rounding-off or mis-coded entries before MVA (no --period = the current calendar year)
-fiken-cli drift --company fiken-demo --period 2026-05
-
-```
-
-After upgrading past the mirror-key fix, refresh the two resources that were stored under stale keys, once per company:
+The skills in this repository describe `fiken-cli` 2.2.0. Check with `fiken-cli version`.
+If the installer gave you an older release, build from a clone:
 
 ```bash
-fiken-cli sync --full --company <slug> --resources journal_entries,bank_accounts
+git clone https://github.com/nytafar/fiken-cli && cd fiken-cli
+./install.sh --from-source
 ```
 
-`fiken-cli doctor` names any company still holding stale rows.
+Other agents, Windows, the MCP server and installer options: [docs/install.md](docs/install.md).
 
-`--since` takes a duration (`7d`, `24h`, `1w`, `30m`) and asks Fiken for rows modified since
-then, on the seven resources whose list endpoints accept a date filter: contacts,
-journal_entries, transactions, products, sales, invoices and credit_notes. Every other
-resource has no such filter and is fetched in full, with a `resource_not_incremental`
-warning. `--full` and `--since` are refused together: one refetches every row, the other a
-window.
+## First run
 
-A plain `fiken-cli sync` is incremental on its own on those same seven resources: each
-company and resource keeps its own watermark, and the next run asks Fiken only for what
-changed since that company's last **complete** pull of it — a pair that has never
-completed one is fetched in full, which is what the first run does. The watermark is the
-start of the run that filled it, moved back a day to cover the API's day-granular filter,
-and it is written only after a pull that landed every page with no error and no row-count
-mismatch, so an interrupted run re-pulls rather than skips. Each windowed pair emits
-`{"event":"sync_window","company":...,"resource":...,"since":...}` in `--json` mode.
-`--since` is a caller window and never touches the watermark; `--full` ignores it, clears
-it for the pairs it refetches, and writes it again from the full pull. Two consequences
-worth knowing: a windowed pull can never conclude that a missing row was deleted, so the
-deletion sweep runs on a pair's first complete pull and on `--full`, not on the cheap
-daily run; and an incremental run does not update the recorded `result_count`, because the
-API's count then describes the window rather than the collection.
+```bash
+export FIKEN_API_TOKEN=...   # personal API token from Fiken: Settings -> API
+fiken-cli doctor             # auth, connectivity, mirror health
+fiken-cli companies          # find your company slug; every command is scoped to it
+fiken-cli sync               # build the mirror; later runs fetch only what changed
+```
+
+OAuth2 for acting on behalf of other companies: `fiken-cli auth login`. See
+[docs/configuration.md](docs/configuration.md). How sync works, windows and full refetches:
+[docs/sync.md](docs/sync.md).
+
+## A VAT term, start to finish
+
+This is the order that works, and the order the skills follow.
+
+1. **Find the open term.** A delivered term leaves a VAT settlement entry in the ledger, a
+   paid one a payment entry. The agent reads them from the mirror and tells you which terms
+   are delivered, paid, open or overdue.
+2. **Triage the bank lines.** The agent opens Superføring for the term's dates and sorts
+   every open line: ready to confirm, needs a booking and has its receipt, needs a booking
+   and lacks one, needs your verdict. You get that table before anything is written.
+3. **Book and confirm.** On your go-ahead it books each line as a paid purchase in NOK from
+   the bank amount, attaches the receipt, removes the inbox copy and confirms the line. A
+   receipt that is not in the Fiken inbox is looked up in your mail, after asking you which
+   mail access to use.
+4. **Sweep.** `drift`, `vat-anomaly` and `duplicates` for the period.
+5. **Check the figure.** `mva-summary` gives the buckets of the return. The amount to trust
+   is the ledger: the sum of the VAT accounts 2700 to 2713 for the period. See the known
+   gaps below for why the two can differ.
+6. **Deliver.** You open the return in Fiken, compare, and deliver.
+
+## The browser part
+
+Superføring runs in a real, visible Chrome that you are signed in to. The agent attaches to
+it over the DevTools port; it does not handle your Fiken password.
+
+- On the same machine: the agent finds a running browser with a debug port, or starts one
+  with its own profile directory so the Fiken login survives between runs.
+- Over ssh, without screen sharing: you start Chrome on your own machine and open a reverse
+  tunnel; the agent works through it while you watch the tab.
+
+Setup and commands: [skills/fiken-superforing/surfaces/cdp.md](skills/fiken-superforing/surfaces/cdp.md).
+
+## What protects your books
+
+- **Test companies by default.** Every write is refused unless the company is a Fiken test
+  company. Real books need `FIKEN_MODE=live` in an untracked env file. There is no flag for
+  it, and the MCP server is always in test mode.
+- **Reads before writes.** A request to look, list or investigate is a triage: the agent
+  reports and stops. It books and confirms only what you ask for.
+- **The bank line is the truth.** A purchase is booked with the bank's date and NOK amount,
+  and the body is checked against the line before it is sent.
+- **No second booking of the same invoice.** Before a purchase is created, the supplier's
+  invoice number is looked up in the books. Receipts that are already booked can still sit
+  unused in the inbox, so the inbox proves nothing.
+- **An audit log.** Every purchase, payment, inbox deletion and confirmed line is appended
+  to a local log with one correlation id per run.
+
+## Two ways the agent writes
+
+- **`commit`, `reconcile`, `reverse`.** The guarded commands: validated, logged in the same
+  call, and for `commit` deduplicated against a durable map, so the same source never books
+  twice. `prepare` and `validate` build and check the proposal first.
+- **The generated commands** (`purchases create`, payments, attachments). They write
+  straight to Fiken. The Superføring flows use these, and supply the checks and the log
+  entries themselves.
+
+Whether Superføring should move onto `commit` is an open design question, listed in
+[docs/design.md](docs/design.md) together with the other gaps in the write path.
+
+## Known gaps
+
+Stated so that nothing above reads as a guarantee it is not. Each has an issue.
+
+- `mva-summary` does not subtract credit notes, so a period with a credited invoice
+  overstates output VAT ([#24](https://github.com/nytafar/fiken-cli/issues/24)).
+- `purchases create` has no built-in guard against an invoice number that is already
+  booked; the skill does the lookup ([#25](https://github.com/nytafar/fiken-cli/issues/25))
+  and has to look the new purchase up afterwards, because the command returns no id
+  ([#26](https://github.com/nytafar/fiken-cli/issues/26)).
+- `missing-bilag` also lists payments, settlements and salary entries, which need no
+  documentation of their own ([#28](https://github.com/nytafar/fiken-cli/issues/28)).
+- `bank-unverified` is anchored to the reconciled date Fiken reports per account. When that
+  date is old, the list is long and says little; the open lines are in Superføring.
+- There is no command yet for term status ([#30](https://github.com/nytafar/fiken-cli/issues/30))
+  or for recurring suppliers with a missing month ([#31](https://github.com/nytafar/fiken-cli/issues/31)).
 
 ## Documentation
 
-- [docs/features.md](docs/features.md): the detectors (`bank-unverified`, `drift`, `vat-anomaly`, `duplicates`, `missing-bilag`), the write pipeline (`prepare`, `validate`, `commit`, `reverse`, `reconcile`, `log-event`), analytics (`mva-summary`, `rollup`, `vendor-profile`), report shape, periods and recipes.
-- [docs/commands.md](docs/commands.md): the generated command reference, output formats, agent flags and exit codes.
-- [docs/configuration.md](docs/configuration.md): auth, the write guard and live mode, config file, environment, troubleshooting.
+- [docs/features.md](docs/features.md): the checks, the write commands, the analytics, report shape, periods and recipes.
+- [docs/sync.md](docs/sync.md): the mirror, incremental sync, windows and full refetches.
+- [docs/commands.md](docs/commands.md): the full command reference, output formats, agent flags and exit codes.
+- [docs/configuration.md](docs/configuration.md): auth, the write guard and live mode, config file, troubleshooting.
 - [docs/install.md](docs/install.md): installer options, other agents, from source, developing the skills.
-- [docs/mcp.md](docs/mcp.md): `fiken-mcp` for Claude Code and Claude Desktop, MCP over HTTP with Fiken OAuth; [docs/serving-publicly.md](docs/serving-publicly.md) for a public endpoint.
-- [docs/design.md](docs/design.md): design principles and the roadmap of known gaps, so nothing above reads as a guarantee it is not.
+- [docs/mcp.md](docs/mcp.md): `fiken-mcp` for Claude Code and Claude Desktop; [docs/serving-publicly.md](docs/serving-publicly.md) for a public endpoint.
+- [docs/design.md](docs/design.md): design principles and the roadmap of known gaps.
 - [skills/fiken/SKILL.md](skills/fiken/SKILL.md) and [skills/fiken-superforing/SKILL.md](skills/fiken-superforing/SKILL.md): what the agent reads.
 - [CHANGELOG.md](CHANGELOG.md).

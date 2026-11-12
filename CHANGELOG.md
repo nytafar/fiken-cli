@@ -4,6 +4,22 @@ This file is maintained by printing-press-library release automation. Do not han
 
 ## Unreleased
 
+### Added
+
+- `fiken-superforing`: `superforing.mjs probe` reports what answers on the DevTools port and refuses an Electron app; `list --buttons` prints each open line with its buttons; `book` takes one open line from purchase body to confirmed line (checks against the line, duplicate guard on supplier and invoice number, attach, inbox delete, reload, confirm, logged); `--reload` on the read commands.
+- `fiken-superforing`: a triage step that reads, reports and stops; a purchase-date rule per MVA-termin; a mail lookup before a line is parked for a missing receipt; connecting to a running browser, starting one, or working through an ssh reverse tunnel.
+- `fiken` skill: a version check, a pointer to `fiken-superforing` for bank lines, and a recipe for preparing an MVA-termin.
+- `README.no.md`, a Norwegian README. `docs/sync.md` holds the sync details that lived in the README.
+
+### Changed
+
+- `README.md` is rewritten for the operator: what to ask for, a VAT term from start to finish, what protects the books, and the known gaps with their issues.
+- `fiken` skill and `docs/features.md` no longer call `commit` the only safe write path: the Superføring flows use the generated create commands with their own checks and log entries. `mva-summary`, `missing-bilag` and `bank-unverified` carry their current limits (#24, #28).
+
+### Fixed
+
+- `fiken-superforing`: `confirm` reloads the panel first, so a suggestion changed by an API write is no longer read stale; button reads wait for a stable, non-empty list, so the first row after a page load no longer reads as having no suggestion.
+
 ## 2.2.0 - 2026-09-11
 
 ### Added

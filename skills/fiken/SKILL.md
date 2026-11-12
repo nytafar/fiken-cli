@@ -26,11 +26,23 @@ curl -fsSL https://raw.githubusercontent.com/nytafar/fiken-cli/main/install.sh |
 The installer verifies the release checksum and puts `fiken-cli` in `~/.local/bin`.
 Verify: `fiken-cli --version`. If it reports "command not found", `~/.local/bin` is not on `$PATH` — add it. Do not proceed with skill commands until verification succeeds.
 
+**Check the version once per session.** This skill describes fiken-cli **2.2.0**. Compare `fiken-cli version` with the newest release:
+
+```bash
+curl -fsSL https://api.github.com/repos/nytafar/fiken-cli/releases/latest | grep -m1 '"tag_name"'
+```
+
+Older than this skill or than the newest release: tell the user and upgrade with the installer above (a rerun replaces the binary), or `go build -o ~/.local/bin/fiken-cli ./cmd/fiken-cli` in a clone when the clone is ahead of the release. A command or flag named here that `--help` does not know is the same signal.
+
 Every Fiken read endpoint as a composable command with offline FTS and a local mirror agents can query with SQL. On top of that, an error-hunting and reconciliation surface — bank-unverified, drift, vat-anomaly, mva-summary, rollup — and a heavily gated write path (prepare, validate, commit, reverse) that is idempotent, date-aligned to the bank line, and fully audited in an append-only log. Existing Fiken tools are read-only or abandoned; none reconcile, none write safely.
 
 ## When to Use This CLI
 
 Use this CLI when an agent needs to answer questions about a Fiken company's books (is everything matched to the bank? are there rounding errors, mis-coded VAT, missing receipts, or duplicate postings?), pull period/VAT/margin data for BI, or safely post and reverse entries with idempotency and a full audit trail. It is the right choice over raw API calls whenever the answer needs a cross-entity join, exact øre arithmetic, or a guarded write.
+
+## Bank lines belong to `fiken-superforing`
+
+Matching, confirming and booking bank lines happens in Fiken's Superføring panel, which has no API. Load the **`fiken-superforing`** skill when the task is: which bank lines are open for a period, what is missing a receipt, book what the bank shows, finish bankavstemming, or prepare the books for an MVA-termin. That skill reads the panel, books paid purchases from the line and confirms them; this skill supplies the lookups around it (mirror, vendor history, detectors, VAT view).
 
 ## Unique Capabilities
 
@@ -39,7 +51,7 @@ These capabilities aren't available in any other tool for this API.
 ### Reconciliation & error hunting
 - **`bank-unverified`** — Lists postings on your bank accounts that aren't yet matched to the bank statement, and shows the exact ledger-vs-reconciled gap per account.
 
-  _Reach for this first when the user asks whether their books match the bank, or to find what's blocking a clean bankavstemming._
+  _A health signal per account, anchored to the reconciled date Fiken reports for it; an account whose anchor is old lists every posting since. It shows ledger postings, not bank lines: the open lines themselves are in Superføring (`fiken-superforing`)._
 
   ```bash
   fiken-cli bank-unverified --company fiken-demo --as-of 2026-05-31 --agent
@@ -67,7 +79,7 @@ These capabilities aren't available in any other tool for this API.
   ```
 - **`missing-bilag`** — Scans purchases and journal entries in a period whose `attachments` array is missing or empty, reporting each document's amount as its impact.
 
-  _Run before closing a period to find postings that still need a receipt attached; the biggest undocumented amounts sort first._
+  _Run before closing a period to find postings that still need a receipt attached; the biggest undocumented amounts sort first. Until nytafar/fiken-cli#28 lands it also lists payment entries, settlements, salary and fees, which need no bilag of their own: read `doc_type` and the description, and filter to purchases first._
 
   ```bash
   fiken-cli missing-bilag --company fiken-demo --period 2026-05 --agent
@@ -102,7 +114,7 @@ Shared flags: `--min-impact-ore` drops findings below an absolute øre threshold
   ```
 - **`commit`** — Posts a validated purchase or journal entry through a guarded path: deduped against the idempotency map, date-aligned to the expected bank-line date, X-Request-ID stamped, and recorded in an append-only audit log in the same call.
 
-  _The only safe way to write to the books from an agent; --dry-run shows the exact request first, and a repeat of the same source no-ops._
+  _The guarded path for a posting drafted from a proposal: --dry-run shows the exact request first, and a repeat of the same source no-ops. The generated create commands (`purchases create`, `sales payments create-sale`, …) write straight to Fiken with no dedupe and no audit event; the one sanctioned use is the `fiken-superforing` flows, which check the line, guard against an existing invoice number and call `log-event` themselves._
 
   ```bash
   fiken-cli commit --file proposal.json --dry-run
@@ -145,7 +157,7 @@ Writing to real books requires live mode, which is reached only by `FIKEN_MODE` 
 ### BI & VAT analytics
 - **`mva-summary`** — Reconstructs a VAT-return-shaped view from local lines: net basis and output/input VAT bucketed by (`vatType`, `mva_code`), for any period.
 
-  _Reach for this to preview what an MVA return will look like, or to reconcile against the official termin report._ Also carries `findings[]` for reverse-charge buckets that disagree with the journal's 2702/2712 pair, and `transactions_indexed`.
+  _Reach for this to preview what an MVA return will look like, or to reconcile against the official termin report._ Also carries `findings[]` for reverse-charge buckets that disagree with the journal's 2702/2712 pair, and `transactions_indexed`. **Credit notes are not subtracted** (nytafar/fiken-cli#24), so a period with a credited invoice overstates output VAT: the figure to file against is the ledger, the sum of journal lines on accounts 2700–2713 for the period.
 
   ```bash
   fiken-cli mva-summary --company fiken-demo --period 2026-03 --agent
@@ -384,7 +396,16 @@ fiken-cli which "<capability in your own words>"
 fiken-cli bank-unverified --company fiken-demo --as-of 2026-05-31 --agent
 ```
 
-Shows the ledger-vs-reconciled gap per bank account and the postings dated after the last reconciled date — the #1 reconciliation question.
+Shows the ledger-vs-reconciled gap per bank account and the postings dated after the last reconciled date. For the open bank lines themselves, load `fiken-superforing`.
+
+### Prepare an MVA-termin
+
+1. **Which termin is open.** A delivered termin has an `Mva-oppgjør` journal entry `Overføring etter mva-melding for <termin>`, a paid one `Betaling av merverdiavgift (mva-melding <termin>)`; query `journal_entries` in the mirror (`~/.local/share/fiken-cli/data.db`, JSON column `data`, `parent_id` = company slug). Done when every termin of the year is delivered, paid or named open.
+2. **Bank lines.** `fiken-superforing` for the termin's dates: triage, then book and confirm. Done when no line is open.
+3. **Sweep.** `sync`, then `drift`, `vat-anomaly`, `duplicates` for the period. Done at zero findings or each one explained.
+4. **VAT figure.** `mva-summary` for the buckets, the 2700–2713 ledger sum for the amount; they agree only when the period has no credit notes.
+
+The user delivers the return in Fiken.
 
 ### Pre-MVA error sweep
 

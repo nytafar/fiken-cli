@@ -12,6 +12,7 @@
 
 Known gaps, stated so nothing above reads as a guarantee it is not:
 
+- **Superføring on the guarded path.** The `fiken-superforing` flows book paid purchases with `purchases create` and supply their own checks and `log-event` calls, because `commit` does not yet take a paid purchase keyed on a bank line with its receipt attached. Moving them onto `commit`, keyed on the line id, would make a bank line impossible to book twice by construction rather than by a lookup.
 - **Idempotent payments.** `reconcile` consults no source→entity map, so a repeated payment registers twice. It needs a durable key and a reserve/advance lifecycle like `commit`'s.
 - **Payments in foreign currency.** `reconcile` sends no `amountInNok`, which Fiken requires whenever the amount is not in NOK, so those payments go through `purchases payments create-purchase` instead.
 - **Payment-processor clearing.** Payout and card-settlement flows still need their clearing-account journal entries posted by hand; no command composes them.

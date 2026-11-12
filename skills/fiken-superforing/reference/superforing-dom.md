@@ -44,8 +44,10 @@ title holds `linje`:
 
 Use `linjeBelop` for payments. `besteBelop` is the currency amount.
 
-Row body and buttons render only while the row is open. Wait about 500 ms after `open`
-before reading buttons; reading earlier yields a false "no suggestion".
+Row body and buttons render only while the row is open, and the suggestion arrives at its
+own pace: 500 ms is usually enough, the first row opened after a page load can take seconds.
+Read until two reads 250 ms apart agree on a non-empty button list. An open row always has
+buttons, so an empty list is a failed read, never "no suggestion": read it again.
 
 ## Buttons
 
@@ -64,7 +66,8 @@ line-to-voucher link exists only in the panel and in our audit log.
 
 A purchase created via API with a **registered payment** becomes `OK, gå til neste` after a
 page reload. Without a payment, the same line keeps `Registrer nytt kjøp` even when the
-purchase exists. The panel does not re-evaluate without a reload.
+purchase exists. The panel does not re-evaluate without a reload, and over CDP navigating to
+the URL the tab already shows is not one: call `Page.reload` (`location.reload()`).
 
 ## Reading the list without truncation
 
@@ -94,7 +97,15 @@ async function expand(id) {
   for (let i = 0; i < 25; i++) { await sleep(120); t = byId(id); if (t && t.closest('details').hasAttribute('open')) break; }
   await sleep(500); return true;
 }
-async function buttons(id) { await expand(id); return [...byId(id).closest('details').querySelectorAll('button')].map(b => norm(b.textContent)).filter(Boolean); }
+async function buttons(id) {            // stable, non-empty read; [] after 5 s = failed read
+  await expand(id); let prev = null;
+  for (let i = 0; i < 20; i++) {
+    const key = [...byId(id).closest('details').querySelectorAll('button')].map(b => norm(b.textContent)).filter(Boolean).join('|');
+    if (key && key === prev) return key.split('|');
+    prev = key; await sleep(250);
+  }
+  return [];
+}
 async function confirm(id, label = 'OK, gå til neste') {
   await expand(id);
   const btn = [...byId(id).closest('details').querySelectorAll('button')].find(b => norm(b.textContent) === label);

@@ -6,7 +6,7 @@ The hand-built surface over the mirror. Every command here reads from the local 
 ### Reconciliation & error hunting
 - **`bank-unverified`** — Lists postings on your bank accounts that aren't yet matched to the bank statement, and shows the exact ledger-vs-reconciled gap per account.
 
-  _Reach for this first when the user asks whether their books match the bank, or to find what's blocking a clean bankavstemming._
+  _A health signal per account, anchored to the reconciled date Fiken reports for it. It shows ledger postings, not bank lines: the open lines themselves are in Superføring (the `fiken-superforing` skill)._
 
   ```bash
   fiken-cli bank-unverified --company fiken-demo --as-of 2026-05-31 --agent
@@ -34,7 +34,7 @@ The hand-built surface over the mirror. Every command here reads from the local 
   ```
 - **`missing-bilag`** — Scans purchases and journal entries in a period whose `attachments` array is missing or empty, reporting each document's amount as its impact.
 
-  _Run before closing a period to find postings that still need a receipt attached; the biggest undocumented amounts sort first._
+  _Run before closing a period to find postings that still need a receipt attached; the biggest undocumented amounts sort first. Until #28 lands it also lists payment entries, settlements, salary and fees, which need no bilag of their own._
 
   ```bash
   fiken-cli missing-bilag --company fiken-demo --period 2026-05 --agent
@@ -50,7 +50,7 @@ The hand-built surface over the mirror. Every command here reads from the local 
   ```
 - **`commit`** — Posts a validated purchase or journal entry through a guarded path: deduped against the idempotency map, date-aligned to the expected bank-line date, X-Request-ID stamped, and recorded in an append-only audit log in the same call.
 
-  _The only safe way to write to the books from an agent; --dry-run shows the exact request first, and a repeat of the same source no-ops._
+  _The guarded path for a posting drafted from a proposal: --dry-run shows the exact request first, and a repeat of the same source no-ops. The generated create commands (`purchases create`, `sales payments create-sale`, …) write straight to Fiken with no dedupe and no audit event; the `fiken-superforing` flows use them, check the bank line, guard against an existing invoice number and call `log-event` themselves._
 
   ```bash
   fiken-cli commit --file proposal.json --dry-run
@@ -87,7 +87,7 @@ The hand-built surface over the mirror. Every command here reads from the local 
 ### BI & VAT analytics
 - **`mva-summary`** — Reconstructs a VAT-return-shaped view from local lines: net basis and output/input VAT bucketed by (`vatType`, `mva_code`), for any period.
 
-  _Reach for this to preview what an MVA return will look like, or to reconcile against the official termin report._ Also carries `findings[]` for reverse-charge buckets that disagree with the journal's 2702/2712 pair, and `transactions_indexed`.
+  _Reach for this to preview what an MVA return will look like, or to reconcile against the official termin report._ **Credit notes are not subtracted** (#24), so a period with a credited invoice overstates output VAT: file against the ledger, the sum of journal lines on accounts 2700–2713. Also carries `findings[]` for reverse-charge buckets that disagree with the journal's 2702/2712 pair, and `transactions_indexed`.
 
   ```bash
   fiken-cli mva-summary --company fiken-demo --period 2026-03 --agent
