@@ -269,6 +269,9 @@ func newDoctorCmd(flags *rootFlags) *cobra.Command {
 			}
 
 			report["version"] = version
+			// PATCH(doctor-version-checks): the latest release and what the
+			// installed skills require (issue #32). See version_check.go.
+			addVersionChecks(cmd.Context(), report)
 
 			if flags.asJSON {
 				if err := printJSONFiltered(cmd.OutOrStdout(), report, flags); err != nil {
@@ -325,6 +328,7 @@ func newDoctorCmd(flags *rootFlags) *cobra.Command {
 					fmt.Fprintf(w, "  %s: %v\n", key, v)
 				}
 			}
+			renderVersionChecks(w, report) // PATCH(doctor-version-checks)
 			// Print auth setup hints (indented under Auth line)
 			if hint, ok := report["auth_hint"]; ok {
 				fmt.Fprintf(w, "  hint: %v\n", hint)

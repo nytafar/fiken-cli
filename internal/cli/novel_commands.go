@@ -13,4 +13,5 @@ import "github.com/spf13/cobra"
 func addHandAuthoredCommands(root *cobra.Command, flags *rootFlags) {
 	root.AddCommand(newNovelMvaStatusCmd(flags))
 	root.AddCommand(newNovelRecurringGapsCmd(flags))
+	addVersionCheckFlag(root, flags)
 }

@@ -6,6 +6,8 @@ license: "Apache-2.0"
 argument-hint: "<command> [args] | install cli|mcp"
 allowed-tools: "Read Bash"
 metadata:
+  fiken-cli:
+    requires: "2.2.0"
   openclaw:
     requires:
       bins:

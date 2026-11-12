@@ -5,6 +5,9 @@ author: "Lasse Jellum"
 license: "Apache-2.0"
 argument-hint: "<company-slug> <fra> <til> [surface: chrome|cdp]"
 allowed-tools: "Read Bash mcp__claude-in-chrome__*"
+metadata:
+  fiken-cli:
+    requires: "2.2.0"
 ---
 
 # Fiken Superføring
