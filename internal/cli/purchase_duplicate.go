@@ -320,6 +320,11 @@ func guardDuplicatePurchase(cmd *cobra.Command, flags *rootFlags, slug, path str
 	allow, _ := cmd.Flags().GetBool(allowDuplicateFlag)
 	verdict, err := checkDuplicatePurchase(cmd.Context(), flags, slug, body, allow)
 	if err != nil {
+		if flags.dryRun {
+			// A preview still previews; the real run will refuse.
+			fmt.Fprintf(cmd.ErrOrStderr(), "warning: %v\n", err)
+			return false, nil
+		}
 		return false, &cliError{code: duplicateExitCode, err: err}
 	}
 	if len(verdict.Existing) == 0 {

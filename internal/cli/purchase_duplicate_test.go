@@ -125,6 +125,17 @@ func TestPurchasesCreate_FailedLookupRefuses(t *testing.T) {
 	}
 }
 
+func TestPurchasesCreate_DryRunWithAFailedLookupStillPreviews(t *testing.T) {
+	srv := &createServer{}
+	_, errOut, err := runCreateCLI(t, srv, purchaseBody, "purchases", "create", "annet", "--stdin", "--agent", "--dry-run")
+	if err != nil {
+		t.Fatalf("a dry run must preview even when the lookup fails: %v", err)
+	}
+	if !strings.Contains(errOut, "could not check") || srv.postCount() != 0 {
+		t.Fatalf("stderr = %q posts = %d, want the warning and no post", errOut, srv.postCount())
+	}
+}
+
 func TestMatchExistingPurchases(t *testing.T) {
 	var rows []map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(existingPurchases+""), &rows); err != nil {
