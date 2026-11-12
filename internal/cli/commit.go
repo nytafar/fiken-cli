@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"strings"
 
+	"fiken-cli/internal/client"
 	"fiken-cli/internal/cliutil"
 	"fiken-cli/internal/fikencore"
 
@@ -125,7 +126,10 @@ func newNovelCommitCmd(flags *rootFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			resp, statusCode, err := c.PostWithHeaders(cmd.Context(), path, body, map[string]string{"X-Request-ID": rid})
+			// Fiken answers a create with an empty body and a Location header,
+			// so the id comes off the header when the body has none (#26).
+			postCtx, created201 := client.NewLocationContext(cmd.Context())
+			resp, statusCode, err := c.PostWithHeaders(postCtx, path, body, map[string]string{"X-Request-ID": rid})
 			inputsJSON, _ := json.Marshal(p)
 			if err != nil || statusCode < 200 || statusCode >= 300 {
 				_ = core.Advance(cmd.Context(), p.CompanySlug, p.SourceSystem, p.SourceID, fikencore.StatusFailed, fikencore.AdvanceOpts{XRequestID: rid})
@@ -142,6 +146,9 @@ func newNovelCommitCmd(flags *rootFlags) *cobra.Command {
 			}
 
 			entityID := extractEntityID(resp, entityType)
+			if entityID == "" {
+				entityID = created201.ID()
+			}
 			_ = core.Advance(cmd.Context(), p.CompanySlug, p.SourceSystem, p.SourceID, fikencore.StatusCommitted,
 				fikencore.AdvanceOpts{FikenEntityType: entityType, FikenEntityID: entityID, XRequestID: rid})
 			eventID, _ := core.LogEvent(cmd.Context(), fikencore.Event{

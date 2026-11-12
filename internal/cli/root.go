@@ -311,6 +311,11 @@ See README.md or skills/fiken/SKILL.md for recipes.`, // PATCH(root-help-skill-p
 	// generated multipart commands untouched. See document_download.go.
 	applyAttachmentFilenameDefaults(rootCmd)
 
+	// PATCH(create-result-id): every POST command reports the id and Location
+	// of what it created. Wrapping the built tree once keeps the 49 generated
+	// POST commands untouched. See create_result.go.
+	applyCreateResultIDs(rootCmd, flags)
+
 	return rootCmd
 }
 

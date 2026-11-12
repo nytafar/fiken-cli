@@ -1,0 +1,32 @@
+{
+  "schema_version": 2,
+  "id": "create-result-id",
+  "applied_at": "2026-11-12",
+  "base_run_id": "20260609-145046",
+  "base_printing_press_version": "4.24.0",
+  "summary": "feat(create): every POST command reports the id and Location of what it created (issue #26)",
+  "reason": "Fiken answers a create with 201, an empty body and a Location header naming the new resource. The printed client returns (body, status) and drops resp.Header, and the printed POST commands print {action, path, resource, status, success}, so nothing that created a purchase, sale, payment or journal entry could say which one it had made. Callers listed by date and matched on the invoice number afterwards, which picks the wrong row when two purchases share a date; `commit` recorded an empty fiken_entity_id for the same reason. Two generated lines carry the fix, both in the shape of earlier patches. (1) internal/client/client.go: captureLocation(ctx, resp.Header) in the success branch of (*Client).doInternal, next to capturePageInfo, feeding the context-value sink in the hand-authored internal/client/location.go (LocationSink, NewLocationContext, LocationID). No signature changes. The sink keeps the LAST Location seen. (2) internal/cli/root.go: applyCreateResultIDs(rootCmd, flags) after the command tree is built, next to applyAttachmentFilenameDefaults. The hand-authored internal/cli/create_result.go walks the tree, wraps the RunE of every command annotated pp:method POST, runs it under a Location context and, where the command would print the JSON envelope anyway (JSON asked for, or stdout not a terminal), buffers the output and adds `id` and `location` to a successful envelope. The id is the last path segment of the Location, emitted as a JSON number when it is one (purchaseId, saleId, paymentId) and as a string otherwise (draft UUIDs). An envelope that does not report success, output that is not the envelope (--csv, --quiet, a dry-run preview) and a response with no Location are passed through byte for byte. On a terminal the command's own output is left alone and one `Created <id> (<location>)` line follows it. Wrapping the tree instead of editing the 49 generated POST files keeps them untouched and covers a POST command the day it is printed. The hand-authored commit.go reads the same sink as a fallback when the response body carries no id.",
+  "files": [
+    "internal/client/client.go",
+    "internal/client/location.go",
+    "internal/cli/root.go",
+    "internal/cli/create_result.go",
+    "internal/cli/commit.go",
+    "internal/client/location_test.go",
+    "internal/cli/create_result_test.go"
+  ],
+  "call_sites": [
+    "PATCH(create-result-id)",
+    "captureLocation(ctx, resp.Header)",
+    "applyCreateResultIDs(rootCmd, flags)",
+    "func NewLocationContext(ctx context.Context) (context.Context, *LocationSink) {",
+    "func LocationID(location string) string {",
+    "func applyCreateResultIDs(cmd *cobra.Command, flags *rootFlags) {",
+    "func withCreateResult(output []byte, location string) []byte {",
+    "postCtx, created201 := client.NewLocationContext(cmd.Context())",
+    "func TestPurchasesCreate_EnvelopeCarriesIDAndLocation(t *testing.T) {",
+    "func TestCreate_NestedAndUUIDLocations(t *testing.T) {",
+    "func TestLocationSink(t *testing.T) {"
+  ],
+  "validated_outcome": "make check green. internal/cli/create_result_test.go drives the real command tree against an httptest server that answers a create with 201, no body and a Location header: `purchases create --stdin --agent` prints id 900123 as a JSON number plus the location and keeps the rest of the envelope; a nested payment create reports the payment id, not the purchase id; a draft's UUID stays a string; a 201 with no Location gains no id; --dry-run posts nothing and reports no id. TestWithCreateResult pins the pass-through cases (failed envelope, non-envelope JSON, CSV, empty). internal/client/location_test.go covers LocationID and the sink, including the no-sink and nil-context calls the patched doInternal line makes. No live API call was made."
+}

@@ -661,6 +661,10 @@ func (c *Client) doInternal(ctx context.Context, method, path string, params map
 			// dropped here with the rest of resp.Header (issue #15). Hand them
 			// to the context sink in page_info.go; no-op without one.
 			capturePageInfo(ctx, resp.Header)
+			// PATCH(create-result-id): Fiken answers a create with 201, an empty
+			// body and a Location header naming the new resource (issue #26).
+			// Hand it to the context sink in location.go; no-op without one.
+			captureLocation(ctx, resp.Header)
 			if method != http.MethodGet && !c.DryRun {
 				c.invalidateCache()
 			}
