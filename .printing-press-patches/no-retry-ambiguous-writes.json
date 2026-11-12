@@ -1,0 +1,23 @@
+{
+  "schema_version": 2,
+  "id": "no-retry-ambiguous-writes",
+  "applied_at": "2026-11-12",
+  "base_run_id": "20260609-145046",
+  "base_printing_press_version": "4.24.0",
+  "summary": "fix(client): send a write once; only reads are retried after a transport error or a 5xx",
+  "reason": "The generated (*Client).doInternal retried every verb up to three times after a transport error and after a 5xx answer. For a read that is harmless. Fiken has no idempotency key, so a create whose answer was lost on the way back (a timeout, a dropped connection, a 502 from a proxy in front of a server that had already booked it) was sent again and booked twice inside one call, below the level where the idempotency map, the supplier and invoice-number guard or commit's recovery pass can see anything. Two lines in internal/client/client.go change: after a transport error the loop returns the error instead of continuing unless retryAfterAmbiguousFailure(method) is true, and the 5xx backoff branch is gated on the same call. The hand-authored internal/client/retry_policy.go answers true for GET, HEAD and OPTIONS only. The retries that remain for writes are the ones where the server said it did nothing: 429 with Retry-After, and the single 401 that follows a token refresh. A caller that gets the error decides what to do: `purchases create` reruns hit the duplicate guard, and `commit` looks in Fiken for what the lost request may have made before posting again.",
+  "files": [
+    "internal/client/client.go",
+    "internal/client/retry_policy.go",
+    "internal/client/retry_policy_test.go"
+  ],
+  "call_sites": [
+    "PATCH(no-retry-ambiguous-writes)",
+    "if !retryAfterAmbiguousFailure(method) {",
+    "if resp.StatusCode >= 500 && attempt < maxRetries && retryAfterAmbiguousFailure(method) {",
+    "func retryAfterAmbiguousFailure(method string) bool {",
+    "func TestWriteIsNotRetriedAfterAServerError(t *testing.T) {",
+    "func TestWriteIsNotRetriedAfterALostAnswer(t *testing.T) {"
+  ],
+  "validated_outcome": "make check green. internal/client/retry_policy_test.go drives the real client against an httptest server: a POST answered 502 is sent once and returns the error (it was sent four times before the fix), a POST whose connection is dropped before any answer is sent once, and a GET answered 502 and then 200 is sent twice and succeeds."
+}

@@ -644,6 +644,12 @@ func (c *Client) doInternal(ctx context.Context, method, path string, params map
 				return nil, 0, ctxErr
 			}
 			lastErr = fmt.Errorf("%s %s: %w", method, c.displayURL(path, authHeader), c.maskError(err, authHeader))
+			// PATCH(no-retry-ambiguous-writes): a write whose answer never
+			// arrived may have been carried out; sending it again can book it
+			// twice. See retry_policy.go.
+			if !retryAfterAmbiguousFailure(method) {
+				return nil, 0, lastErr
+			}
 			continue
 		}
 
@@ -723,7 +729,9 @@ func (c *Client) doInternal(ctx context.Context, method, path string, params map
 		}
 
 		// Server error - retry with backoff
-		if resp.StatusCode >= 500 && attempt < maxRetries {
+		// PATCH(no-retry-ambiguous-writes): a 5xx on a write does not say the
+		// write was not carried out, so only reads are sent again.
+		if resp.StatusCode >= 500 && attempt < maxRetries && retryAfterAmbiguousFailure(method) {
 			wait := time.Duration(math.Pow(2, float64(attempt))) * time.Second
 			fmt.Fprintf(os.Stderr, "server error %d, retrying in %s (attempt %d/%d)\n", resp.StatusCode, wait, attempt+1, maxRetries)
 			if err := sleepContext(ctx, wait); err != nil {
