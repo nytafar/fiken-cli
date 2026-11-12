@@ -18,6 +18,9 @@ Every booking starts from a live bank line and ends with that line confirmed in 
 - **Start in the live panel.** The first action of every run is reading the open lines for
   the period from Superføring. Inbox documents, `bank-unverified` and the mirror are lookups
   *for* a line, never a starting point.
+- **The request bounds the writes.** "What is open", "what is missing", "investigate" are a
+  **triage**: read, report, stop. Confirming and booking start when the user asks for them,
+  for the lines they named.
 - **Book paid, in NOK, from the line.** Purchases are created `paid: true`, netto equal to
   `linjeBelop`, payment date equal to `linje.dato`. Fiken's own posting rules (reverse
   charge on foreign services) still apply through `vatType`.
@@ -40,12 +43,17 @@ Every booking starts from a live bank line and ends with that line confirmed in 
 
 1. Resolve `bankAccountId` for the account: `fiken-cli bank-accounts get <slug> --agent`.
 2. Open the panel for the period and read the lines. Method per surface:
+   - CDP script against a headed Chrome, preferred; it starts by finding or starting the
+     browser: [`surfaces/cdp.md`](surfaces/cdp.md)
    - Claude in Chrome: [`surfaces/claude-in-chrome.md`](surfaces/claude-in-chrome.md)
-   - CDP script against the user's headed Chromium, preferred when port 9222 answers: [`surfaces/cdp.md`](surfaces/cdp.md)
    Both read the same DOM; the shared facts are in
    [`reference/superforing-dom.md`](reference/superforing-dom.md).
-3. Work the lines in this order, so the user is interrupted once, late:
-   1. `show` every row; confirm the clean ones (`OK, gå til neste`, `Bekreft dato`).
+3. **Triage.** Read every open row with its buttons (`list --buttons`) and sort it into:
+   ready to confirm, needs a booking and has its receipt, needs a booking and lacks one,
+   needs a verdict. Done when every row is in exactly one group with its receipt named or
+   marked missing. On a triage request, report that table and stop here.
+4. Work the lines in this order, so the user is interrupted once, late:
+   1. Confirm the clean ones (`OK, gå til neste`, `Bekreft dato`).
    2. Book and confirm the rows a flow can fix from the books.
    3. Raise every verdict question in one batch, then act on the answers.
    4. Park the rest.
@@ -55,7 +63,7 @@ Every booking starts from a live bank line and ends with that line confirmed in 
    - Recurring card subscription with only a first receipt: [`flows/abonnement-internt-bilag.md`](flows/abonnement-internt-bilag.md)
    - Two lines, one amount, radio candidates (double payment): [`flows/dobbeltbetaling.md`](flows/dobbeltbetaling.md)
    - `Antatt` row whose `Leverandør` differs from the bank title: [`flows/leverandor-navnebytte.md`](flows/leverandor-navnebytte.md)
-4. Done when every line in the period is either confirmed or parked with a reason, and the
+5. Done when every line in the period is either confirmed or parked with a reason, and the
    parked list is in the final report with `linje.id`, date, amount and reason.
 
 Receipts downloaded during a run go to `bilag/<documentId>.pdf` under the period's working
@@ -66,4 +74,4 @@ proposal files are not part of the flow.
 
 One file under `flows/`, named after the line kind it handles. It states: how to recognise
 the line (label, `linjetype`, sign), the API calls that make it confirmable, the button that
-confirms it, and what to log. Add one line to step 3 above. Surfaces stay untouched.
+confirms it, and what to log. Add one line to step 4 above. Surfaces stay untouched.
