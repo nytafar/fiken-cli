@@ -122,6 +122,11 @@ func newPurchasesCreateCmd(flags *rootFlags) *cobra.Command {
 					body["transactionId"] = bodyTransactionId
 				}
 			}
+			// PATCH(purchase-duplicate-guard): refuse a purchase whose supplier
+			// already has this invoice number (issue #25). See purchase_duplicate.go.
+			if done, gerr := guardDuplicatePurchase(cmd, flags, args[0], path, body); done || gerr != nil {
+				return gerr
+			}
 			data, statusCode, err := c.PostWithParams(cmd.Context(), path, params, body)
 			if err != nil {
 				return classifyAPIError(err, flags)
@@ -274,6 +279,7 @@ func newPurchasesCreateCmd(flags *rootFlags) *cobra.Command {
 	cmd.Flags().StringVar(&bodySupplierId, "supplier-id", "", "Id of supplier if not a cash purchase.")
 	cmd.Flags().StringVar(&bodyTransactionId, "transaction-id", "", "Transaction id")
 	cmd.Flags().BoolVar(&stdinBody, "stdin", false, "Read request body as JSON from stdin")
+	addPurchaseDuplicateFlags(cmd) // PATCH(purchase-duplicate-guard)
 
 	return cmd
 }
