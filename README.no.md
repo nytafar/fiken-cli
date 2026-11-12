@@ -12,9 +12,10 @@ Verktøyet har tre deler:
 - **Et lokalt speil av regnskapet.** Tolv ressurser per selskap synkes til SQLite. Spørsmål
   om historikk besvares lokalt, med SQL og fritekstsøk, i stedet for gjennom et API med
   strenge grenser.
-- **Kontroller og oversikter oppå speilet.** Øreavvik, MVA-koder som bryter med mønsteret
-  for en leverandør, dobbeltføringer, manglende bilag, en oppstilling formet som
-  MVA-meldingen, og omsetning, kostnad og margin per periode.
+- **Kontroller og oversikter oppå speilet.** Hvilke MVA-terminer som står åpne eller er
+  forfalt, øreavvik, MVA-koder som bryter med mønsteret for en leverandør, dobbeltføringer,
+  manglende bilag, abonnementer som har sluttet å bli bokført, en oppstilling formet som
+  MVA-meldingen og kontrollert mot hovedboken, og omsetning, kostnad og margin per periode.
 - **Bankavstemming i Superføring.** Fikens eget avstemmingspanel har ikke noe API. Skillen
   `fiken-superforing` styrer panelet i nettleseren din mens du ser på: den leser de åpne
   linjene, bokfører betalte kjøp fra dem med bilaget vedlagt, og bekrefter dem.
@@ -23,10 +24,12 @@ Verktøyet har tre deler:
 
 | Du vil | Si til agenten | Den bruker |
 | --- | --- | --- |
+| Vite hvilken MVA-termin som står for tur | «Hvilke MVA-terminer er åpne eller forfalt?» | `mva-status`: én rad per termin med frist, levering, betaling og status |
 | Vite hvilke banklinjer som står åpne, og hva som mangler bilag | «Hva står åpent i banken for juli og august?» | `fiken-superforing`, kartlegging: leser og rapporterer, skriver ingenting |
 | Bokføre det banken viser | «Bokfør og bekreft de linjene» | `fiken-superforing`: ett betalt kjøp per linje, bilag vedlagt, linjen bekreftet |
+| Finne kjøp som aldri ble bokført | «Mangler det noen abonnementer for juli og august?» | `recurring-gaps`: leverandører som føres hver måned, og månedene der det ikke står noe |
 | Finne feil før en MVA-melding | «Gå gjennom juli og august for feil» | `drift`, `vat-anomaly`, `duplicates`, `missing-bilag` |
-| Se MVA-beløpet før du leverer | «Hva kommer meldingen for terminen til å vise?» | `mva-summary`, avstemt mot hovedboken |
+| Se MVA-beløpet før du leverer | «Hva kommer meldingen for terminen til å vise?» | `mva-summary`: postene i meldingen, med kreditnotaer trukket fra, holdt opp mot hovedboken |
 | Se hvordan en leverandør pleier å føres | «Hvordan fører vi denne leverandøren?» | `vendor-profile`, speilet |
 | Se omsetning, kostnad eller margin | «Margin per måned i år» | `rollup` |
 
@@ -43,8 +46,10 @@ Første linje installerer siste utgitte versjon i `~/.local/bin` og kontrollerer
 Andre linje installerer begge skills, `fiken` og `fiken-superforing`, gjennom
 [`npx skills`](https://skills.sh/).
 
-Skillene i dette repoet beskriver `fiken-cli` 2.2.0. Sjekk med `fiken-cli version`. Ga
-installasjonen deg en eldre versjon, bygger du fra en klone:
+Skillene i dette repoet beskriver `fiken-cli` 2.2.0, og det står i hodet på hver av dem.
+`fiken-cli doctor` sier fra når det finnes en nyere utgivelse, og når programmet er eldre
+enn en installert skill krever, sammen med kommandoen som oppgraderer. Ga installasjonen
+deg en eldre versjon enn skillene beskriver, bygger du fra en klone:
 
 ```bash
 git clone https://github.com/nytafar/fiken-cli && cd fiken-cli
@@ -71,9 +76,10 @@ full ny henting, står i [docs/sync.md](docs/sync.md).
 
 Dette er rekkefølgen som fungerer, og den skillene følger.
 
-1. **Finn den åpne terminen.** En levert termin etterlater et MVA-oppgjørsbilag i
-   hovedboken, en betalt termin et betalingsbilag. Agenten leser dem fra speilet og sier
-   hvilke terminer som er levert, betalt, åpne eller forfalt.
+1. **Finn den åpne terminen.** `mva-status` lister årets terminer med frist og sier hvilke
+   som er levert, betalt, åpne eller forfalt. Den leser oppgjørsbilagene Fiken fører når en
+   melding leveres og når den betales, og varsler hvis noe er bokført i en termin etter at
+   meldingen gikk inn.
 2. **Kartlegg banklinjene.** Agenten åpner Superføring for terminens datoer og sorterer
    hver åpne linje: klar til bekreftelse, må bokføres og har bilag, må bokføres og mangler
    bilag, eller trenger din vurdering. Du får den tabellen før noe blir skrevet.
@@ -81,11 +87,17 @@ Dette er rekkefølgen som fungerer, og den skillene følger.
    med bankens beløp, legger ved bilaget, fjerner kopien i innboksen og bekrefter linjen.
    Ligger ikke kvitteringen i Fiken-innboksen, leter den i e-posten din, etter å ha spurt
    deg hvilken e-posttilgang den skal bruke.
-4. **Feilsøk.** `drift`, `vat-anomaly` og `duplicates` for perioden.
-5. **Kontroller beløpet.** `mva-summary` viser postene i meldingen. Beløpet du kan stole på
-   er hovedboken: summen av MVA-kontoene 2700 til 2713 for perioden. Under «Kjente hull»
-   står det hvorfor de to kan avvike.
-6. **Lever.** Du åpner meldingen i Fiken, sammenligner og leverer.
+4. **Let etter det som mangler.** `recurring-gaps` lister leverandørene som har vært ført
+   måned etter måned, og som så har en måned uten noe, med det vanlige beløpet. Det er et
+   tips om hvor du skal lete i Superføring; banklinjen avgjør om det faktisk ble trukket noe.
+5. **Feilsøk.** `drift`, `vat-anomaly`, `duplicates` og `missing-bilag` for perioden.
+   `missing-bilag` melder kjøp, salg og frie posteringer uten bilag, og teller opp det den
+   hopper over (betalinger, oppgjør, lønn) i stedet for å liste det.
+6. **Kontroller beløpet.** `mva-summary` viser postene i meldingen med kreditnotaer trukket
+   fra, og holder summen opp mot MVA-kontoene i hovedboken (2700 til 2719) for de samme
+   datoene. Skiller de seg med mer enn en krone, sier den det og viser hvilken type
+   postering avviket ligger i. Det er hovedboken meldingen leveres fra.
+7. **Lever.** Du åpner meldingen i Fiken, sammenligner og leverer.
 
 ## Nettleserdelen
 
@@ -108,9 +120,11 @@ Oppsett og kommandoer: [skills/fiken-superforing/surfaces/cdp.md](skills/fiken-s
   kartlegging: den rapporterer og stopper. Den bokfører og bekrefter bare det du ber om.
 - **Banklinjen er fasit.** Et kjøp bokføres med bankens dato og beløp i NOK, og innholdet
   kontrolleres mot linjen før det sendes.
-- **Samme faktura bokføres ikke to ganger.** Før et kjøp opprettes, slås leverandørens
-  fakturanummer opp i regnskapet. Kvitteringer som alt er bokført kan fortsatt ligge ubrukt
-  i innboksen, så innboksen beviser ingenting.
+- **Samme faktura bokføres ikke to ganger.** `purchases create` og `commit` slår opp
+  leverandørens fakturanummer i Fiken før de sender noe, og nekter med det kjøpet som
+  finnes fra før, datoen på det og om det er betalt. Kvitteringer som alt er bokført kan
+  fortsatt ligge ubrukt i innboksen, så innboksen beviser ingenting; `prepare` lister
+  kjøpene som allerede har et innboksdokument som bilag.
 - **Revisjonslogg.** Hvert kjøp, hver betaling, hver sletting i innboksen og hver bekreftet
   linje føres i en lokal logg, med én korrelasjons-ID per kjøring.
 
@@ -127,21 +141,19 @@ Om Superføring bør flyttes over på `commit` er et åpent designspørsmål. De
 
 ## Kjente hull
 
-Sagt rett ut, så ingenting over leses som en garanti det ikke er. Hvert punkt har en issue.
+Sagt rett ut, så ingenting over leses som en garanti det ikke er.
 
-- `mva-summary` trekker ikke fra kreditnotaer. En periode med en kreditert faktura viser
-  derfor for høy utgående MVA ([#24](https://github.com/nytafar/fiken-cli/issues/24)).
-- `purchases create` har ingen innebygd sperre mot et fakturanummer som alt er bokført;
-  skillen gjør oppslaget ([#25](https://github.com/nytafar/fiken-cli/issues/25)). Den må
-  også slå opp det nye kjøpet etterpå, fordi kommandoen ikke returnerer noen id
-  ([#26](https://github.com/nytafar/fiken-cli/issues/26)).
-- `missing-bilag` lister også betalinger, oppgjør og lønnsposter, som ikke trenger eget
-  bilag ([#28](https://github.com/nytafar/fiken-cli/issues/28)).
+- `mva-summary` leser salg, kreditnotaer og kjøp. MVA som kommer inn i hovedboken på annen
+  måte, for eksempel et kassaoppgjør eller en fri postering rett på en MVA-konto, er ikke
+  med i postene. Avviket mot hovedboken blir meldt, med typen postering det gjelder, men
+  postene mangler fortsatt det beløpet.
 - `bank-unverified` tar utgangspunkt i avstemmingsdatoen Fiken oppgir per konto. Er den
   datoen gammel, blir listen lang og sier lite; de åpne linjene finner du i Superføring.
-- Det finnes ennå ingen kommando for terminstatus
-  ([#30](https://github.com/nytafar/fiken-cli/issues/30)) eller for faste leverandører som
-  mangler en måned ([#31](https://github.com/nytafar/fiken-cli/issues/31)).
+- `recurring-gaps` ser leverandører, ikke kontantkjøp, og en måned som ikke er ferdig kan
+  se ut som et hull helt til trekket kommer.
+- Et speil som ble bygget før lagringsfeilene ble rettet, kan ha rader som ikke hører til
+  noe selskap. `doctor` melder dem som `unowned_rows`. Ingen kommando leser dem, og de
+  endrer ingen tall, men ingen ny synk fjerner dem heller.
 
 ## Dokumentasjon
 

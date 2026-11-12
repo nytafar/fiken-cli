@@ -28,13 +28,13 @@ curl -fsSL https://raw.githubusercontent.com/nytafar/fiken-cli/main/install.sh |
 The installer verifies the release checksum and puts `fiken-cli` in `~/.local/bin`.
 Verify: `fiken-cli --version`. If it reports "command not found", `~/.local/bin` is not on `$PATH` — add it. Do not proceed with skill commands until verification succeeds.
 
-**Check the version once per session.** This skill describes fiken-cli **2.2.0**. Compare `fiken-cli version` with the newest release:
+**Check the version once per session.** This skill describes fiken-cli **2.2.0** and states it in its frontmatter (`metadata.fiken-cli.requires`). `doctor` does the comparison:
 
 ```bash
-curl -fsSL https://api.github.com/repos/nytafar/fiken-cli/releases/latest | grep -m1 '"tag_name"'
+fiken-cli doctor --json   # .update_available, .latest_release, .skills[] with requires / satisfied, .upgrade_command
 ```
 
-Older than this skill or than the newest release: tell the user and upgrade with the installer above (a rerun replaces the binary), or `go build -o ~/.local/bin/fiken-cli ./cmd/fiken-cli` in a clone when the clone is ahead of the release. A command or flag named here that `--help` does not know is the same signal.
+`update_available: true`, or a skill with `satisfied: false`: tell the user and run `.upgrade_command` (a rerun of the installer replaces the binary), or `go build -o ~/.local/bin/fiken-cli ./cmd/fiken-cli` in a clone when the clone is ahead of the release. `latest_release` is absent when the host is offline; that is not an error. A command or flag named here that `--help` does not know is the same signal as an old binary.
 
 Every Fiken read endpoint as a composable command with offline FTS and a local mirror agents can query with SQL. On top of that, an error-hunting and reconciliation surface — bank-unverified, drift, vat-anomaly, mva-summary, rollup — and a heavily gated write path (prepare, validate, commit, reverse) that is idempotent, date-aligned to the bank line, and fully audited in an append-only log. Existing Fiken tools are read-only or abandoned; none reconcile, none write safely.
 
@@ -79,17 +79,24 @@ These capabilities aren't available in any other tool for this API.
   ```bash
   fiken-cli duplicates --window-days 5 --company fiken-demo --agent
   ```
-- **`missing-bilag`** — Scans purchases and journal entries in a period whose `attachments` array is missing or empty, reporting each document's amount as its impact.
+- **`missing-bilag`** — Reports the postings in a period that need their own bilag and have none: purchases (supplier and cash) and sales without an attachment, and journal entries not derived from a documented source (free postings, customs declarations, any transaction type the command does not know).
 
-  _Run before closing a period to find postings that still need a receipt attached; the biggest undocumented amounts sort first. Until nytafar/fiken-cli#28 lands it also lists payment entries, settlements, salary and fees, which need no bilag of their own: read `doc_type` and the description, and filter to purchases first._
+  _Run before closing a period; the biggest undocumented amounts sort first. Journal entries that need no bilag of their own are counted per class under `excluded`, not reported: `document_posting`, `payment`, `provider_settlement`, `vat_settlement`, `salary_and_tax`, `bank_fee_and_interest`, `internal_transfer`, `year_end_and_system`. Zero findings with a filled `excluded` means the period is documented; zero findings and an empty `excluded` means nothing was read. `--include <class,…|all>` reports a class anyway._
 
   ```bash
   fiken-cli missing-bilag --company fiken-demo --period 2026-05 --agent
   ```
+- **`recurring-gaps`** — Lists suppliers booked month after month that have a month in the period with no purchase: per (supplier, account) booked in at least `--min-months` (3) of the `--lookback` (6) months before, with the usual amount, the last booking, and any unused inbox document from the supplier in the gap month.
+
+  _Run before a VAT return to find purchases that do not exist yet, which no other detector can see. `recurring_gap` is a warning; `recurring_ended` (last booking more than `--ended-after` months back) is a subscription that stopped. A hint for where to look in `fiken-superforing`, not proof of a charge: the bank line decides._
+
+  ```bash
+  fiken-cli recurring-gaps --company fiken-demo --period 2026-07-01:2026-08-31 --agent
+  ```
 
 ### Report shape
 
-`drift`, `duplicates`, `missing-bilag`, `vat-anomaly` and `bank-unverified` emit one envelope, inside the standard provenance wrapper:
+`drift`, `duplicates`, `missing-bilag`, `recurring-gaps`, `vat-anomaly` and `bank-unverified` emit one envelope, inside the standard provenance wrapper:
 
 ```json
 {"results": {"company": "...", "detector": "drift",
@@ -104,7 +111,7 @@ These capabilities aren't available in any other tool for this API.
 
 Shared flags: `--min-impact-ore` drops findings below an absolute øre threshold; `--limit` (default 200) truncates `findings[]` only — `total_findings` and `summary[]` always describe the full set. Findings sort by |impact| descending, then date. Text output leads with the summary block.
 
-**Periods.** `--period` on `drift`, `duplicates`, `missing-bilag`, `vat-anomaly`, `mva-summary`, `rollup` and `vendor-profile` accepts `YYYY`, `YYYY-MM`, `YYYY-Qn`, `from:to` (YYYY-MM-DD), or `all`. **Unset means the current calendar year, not all history** — `window.source` says which (`flag` | `default_current_year` | `all`), and `undated_documents` counts the documents skipped for having no date. `bank-unverified` is anchored to each account's own reconciled date and takes `--as-of` instead.
+**Periods.** `--period` on `drift`, `duplicates`, `missing-bilag`, `recurring-gaps`, `vat-anomaly`, `mva-summary`, `rollup` and `vendor-profile` accepts `YYYY`, `YYYY-MM`, `YYYY-Qn`, `from:to` (YYYY-MM-DD), or `all`. **Unset means the current calendar year, not all history** — `window.source` says which (`flag` | `default_current_year` | `all`), and `undated_documents` counts the documents skipped for having no date. `bank-unverified` is anchored to each account's own reconciled date and takes `--as-of` instead.
 
 ### Gated audited writes
 - **`validate`** — Dry-runs a proposed posting before it touches the books: balanced debit/credit in øre, account exists, MVA code plausible for the account, period open, date sane.
@@ -152,14 +159,24 @@ Shared flags: `--min-impact-ore` drops findings below an absolute øre threshold
 
 ### Write guard and live mode
 
+**Duplicate guard.** `purchases create` and `commit` look up the supplier (`supplierId`) and invoice number (`identifier`) in Fiken before they post: live for purchases dated within 92 days, the mirror for every date. A hit exits **9**, posts nothing, and names the existing purchase with its date and paid state (`existing[]` in the JSON). Paid: the purchase is done. Unpaid: register the payment on it. `--idempotent` turns the refusal into a success that returns the existing `id`; `--allow-duplicate` skips the check. A create answers with `id` and `location` in its envelope, so no lookup is needed afterwards. `prepare` lists `already_booked` purchases for an inbox document, because a booked receipt can still read as unused in the inbox.
+
 Every mutating request is refused unless the synced company record has `testCompany: true`. A refusal exits **8** with a JSON error naming the company slug and a reason code: `not_test_company`, `company_unknown` (the slug is absent from the local mirror — build it first), or `guard_unconfigured` (the fail-closed default). Nothing goes on the wire.
 
 Writing to real books requires live mode, which is reached only by `FIKEN_MODE` set to `live` in an untracked env file (`.env.local` or `.env` in the working directory, or `~/.config/fiken-cli/env`) or in the process environment. **There is deliberately no CLI flag**: `--agent` never changes the write mode — only `FIKEN_MODE` in the process environment or an untracked env file does — and the MCP server is always in test mode.
 
 ### BI & VAT analytics
-- **`mva-summary`** — Reconstructs a VAT-return-shaped view from local lines: net basis and output/input VAT bucketed by (`vatType`, `mva_code`), for any period.
+- **`mva-status`** — Lists the company's VAT terms for a year, one row per term from its `vatType` (bi-monthly, monthly, yearly): period, due date (moved off weekends and public holidays), delivered date and amount, paid date and amount, outstanding, what sits on the VAT accounts, and `state`: `paid`, `delivered`, `open` or `overdue`.
 
-  _Reach for this to preview what an MVA return will look like, or to reconcile against the official termin report._ Also carries `findings[]` for reverse-charge buckets that disagree with the journal's 2702/2712 pair, and `transactions_indexed`. **Credit notes are not subtracted** (nytafar/fiken-cli#24), so a period with a credited invoice overstates output VAT: the figure to file against is the ledger, the sum of journal lines on accounts 2700–2713 for the period.
+  _The first question before a VAT return. `.open_terms` and `.overdue_terms` name the terms; `findings[]` carries `mva_term_overdue`, `posted_after_delivery` (something was booked into a delivered term and needs a corrected return) and `settlement_account_residual` (a 2740 balance the listed terms do not explain). `--date YYYY-MM-DD` adds `.date.closed`: whether the term that date falls in is delivered._
+
+  ```bash
+  fiken-cli mva-status --company fiken-demo --agent
+  fiken-cli mva-status --company fiken-demo --date 2026-06-28 --agent
+  ```
+- **`mva-summary`** — Reconstructs a VAT-return-shaped view from local lines: net basis and output/input VAT bucketed by (`vatType`, `mva_code`), for any period. Credit notes reduce the sales bucket their lines belong to (`credit_notes` says by how much).
+
+  _Reach for this to preview what an MVA return will look like, or to reconcile against the official termin report._ `ledger` holds the movement on the VAT accounts 2700–2719 for the same window and `ledger.diff_ore` the difference; above one krone it is a `ledger_vat_mismatch` finding, and `ledger.by_type` shows which transaction types carry VAT that no sale or purchase explains (`from_documents: false`). The ledger is what the return is filed from. Also carries `findings[]` for reverse-charge buckets that disagree with the journal's 2702/2712 pair, and `transactions_indexed`.
 
   ```bash
   fiken-cli mva-summary --company fiken-demo --period 2026-03 --agent
@@ -402,10 +419,11 @@ Shows the ledger-vs-reconciled gap per bank account and the postings dated after
 
 ### Prepare an MVA-termin
 
-1. **Which termin is open.** A delivered termin has an `Mva-oppgjør` journal entry `Overføring etter mva-melding for <termin>`, a paid one `Betaling av merverdiavgift (mva-melding <termin>)`; query `journal_entries` in the mirror (`~/.local/share/fiken-cli/data.db`, JSON column `data`, `parent_id` = company slug). Done when every termin of the year is delivered, paid or named open.
+1. **Which termin is open.** `sync`, then `mva-status --company <slug> --agent`. Done when every termin of the year is named delivered, paid, open or overdue, and each finding is reported to the user.
 2. **Bank lines.** `fiken-superforing` for the termin's dates: triage, then book and confirm. Done when no line is open.
-3. **Sweep.** `sync`, then `drift`, `vat-anomaly`, `duplicates` for the period. Done at zero findings or each one explained.
-4. **VAT figure.** `mva-summary` for the buckets, the 2700–2713 ledger sum for the amount; they agree only when the period has no credit notes.
+3. **What is not there.** `recurring-gaps` for the termin's dates. Each `recurring_gap` is a place to look in Superføring. Done when each is booked, or explained by the bank showing no charge.
+4. **Sweep.** `sync`, then `drift`, `vat-anomaly`, `duplicates`, `missing-bilag` for the period. Done at zero findings or each one explained.
+5. **VAT figure.** `mva-summary` for the buckets. Done when `ledger.diff_ore` is within a krone, or the `ledger_vat_mismatch` finding is explained from `ledger.by_type`.
 
 The user delivers the return in Fiken.
 

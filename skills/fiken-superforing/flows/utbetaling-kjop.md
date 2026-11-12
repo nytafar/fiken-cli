@@ -83,7 +83,7 @@ The purchase date decides which MVA-termin the cost and its VAT land in.
 | Invoice date vs bank date | Purchase `date` |
 |---|---|
 | Same termin | bank date |
-| Invoice in an earlier termin that is **closed** (MVA-melding delivered: an `Mva-oppgjør` journal entry `Overføring etter mva-melding for <termin>` exists) | bank date |
+| Invoice in an earlier termin that is **closed** (`fiken-cli mva-status --company <slug> --date <invoice date> --agent` answers `.date.closed: true`: the MVA-melding for that termin is delivered) | bank date |
 | Different termins, the invoice's still open | ask the user: invoice date or bank date |
 
 `paymentDate` is the bank date in every case.

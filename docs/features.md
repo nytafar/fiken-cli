@@ -32,12 +32,19 @@ The hand-built surface over the mirror. Every command here reads from the local 
   ```bash
   fiken-cli duplicates --window-days 5 --company fiken-demo --agent
   ```
-- **`missing-bilag`** — Scans purchases and journal entries in a period whose `attachments` array is missing or empty, reporting each document's amount as its impact.
+- **`missing-bilag`** — Reports the postings in a period that need their own bilag and have none: purchases (supplier and cash) and sales without an attachment, and journal entries not derived from a documented source (free postings, customs declarations, any transaction type the command does not know).
 
-  _Run before closing a period to find postings that still need a receipt attached; the biggest undocumented amounts sort first. Until #28 lands it also lists payment entries, settlements, salary and fees, which need no bilag of their own._
+  _Run before closing a period; the biggest undocumented amounts sort first. Journal entries that need no bilag of their own are counted per class under `excluded` instead of reported: the posting of a purchase or sale and payments on it, payment-provider settlements, VAT settlement, salary and tax, bank fees and interest, internal transfers, year-end and system entries. An entry is classified on its `transactionType` and on whether its transaction is a mirrored purchase or sale, never on its description. `--include <class,…|all>` reports a class anyway._
 
   ```bash
   fiken-cli missing-bilag --company fiken-demo --period 2026-05 --agent
+  ```
+- **`recurring-gaps`** — Lists suppliers booked month after month that have a month in the period with no purchase. A series is one (supplier, account) pair booked in at least `--min-months` (3) of the `--lookback` (6) months before the month checked; the finding carries the usual amount (the median), the last booking and any unused inbox document from the supplier in the gap month.
+
+  _Run before a VAT return to find purchases that do not exist yet: the unbooked subscription that `missing-bilag` and `bank-unverified` cannot see. A series whose last booking is more than `--ended-after` (3) months back is reported as `recurring_ended`, not as a gap. A hint for where to look in Superføring, not proof of a charge._
+
+  ```bash
+  fiken-cli recurring-gaps --company fiken-demo --period 2026-07-01:2026-08-31 --agent
   ```
 
 ### Gated audited writes
@@ -85,9 +92,16 @@ The hand-built surface over the mirror. Every command here reads from the local 
   ```
 
 ### BI & VAT analytics
-- **`mva-summary`** — Reconstructs a VAT-return-shaped view from local lines: net basis and output/input VAT bucketed by (`vatType`, `mva_code`), for any period.
+- **`mva-status`** — Lists the company's VAT terms for a year, one row per term from its `vatType` (bi-monthly, monthly, yearly): period, due date, delivered date and amount, paid date and amount, outstanding, what sits on the VAT accounts, and a state: `paid`, `delivered`, `open` or `overdue`.
 
-  _Reach for this to preview what an MVA return will look like, or to reconcile against the official termin report._ **Credit notes are not subtracted** (#24), so a period with a credited invoice overstates output VAT: file against the ledger, the sum of journal lines on accounts 2700–2713. Also carries `findings[]` for reverse-charge buckets that disagree with the journal's 2702/2712 pair, and `transactions_indexed`.
+  _The first question before a VAT return: which term is open, and is anything overdue. Read from the structure of the `Mva-oppgjør` entries: a delivery is the one that empties the VAT accounts onto 2740, a payment the one that moves 2740 against the bank. Due dates are one month and ten days after the term ends, 31 August for the third bi-monthly term and 10 March for a yearly one, moved off weekends and public holidays. Findings: `mva_term_overdue`, `posted_after_delivery`, `settlement_account_residual`. `--date` says whether the term a date falls in is closed._
+
+  ```bash
+  fiken-cli mva-status --company fiken-demo --agent
+  ```
+- **`mva-summary`** — Reconstructs a VAT-return-shaped view from local lines: net basis and output/input VAT bucketed by (`vatType`, `mva_code`), for any period. Credit notes reduce the sales bucket their lines belong to.
+
+  _Reach for this to preview what an MVA return will look like, or to reconcile against the official termin report._ The totals are compared with the movement on the ledger's VAT accounts (2700–2719) in the same window: `ledger.diff_ore` is the difference, a `ledger_vat_mismatch` finding reports one above a krone, and `ledger.by_type` shows which transaction types carry VAT that no sale or purchase explains. Also carries `findings[]` for reverse-charge buckets that disagree with the journal's 2702/2712 pair, and `transactions_indexed`.
 
   ```bash
   fiken-cli mva-summary --company fiken-demo --period 2026-03 --agent
@@ -109,7 +123,7 @@ The hand-built surface over the mirror. Every command here reads from the local 
 
 ## Report shape and periods
 
-`drift`, `duplicates`, `missing-bilag`, `vat-anomaly` and `bank-unverified` emit one envelope, inside the standard provenance wrapper:
+`drift`, `duplicates`, `missing-bilag`, `recurring-gaps`, `vat-anomaly` and `bank-unverified` emit one envelope, inside the standard provenance wrapper:
 
 ```json
 {"results": {"company": "...", "detector": "drift",
@@ -124,7 +138,7 @@ The hand-built surface over the mirror. Every command here reads from the local 
 
 `--min-impact-ore` drops findings below an absolute øre threshold; `--limit` (default 200) truncates `findings[]` only — `total_findings` and `summary[]` always describe the full set. Findings sort by |impact| descending, then date; text output leads with the summary block.
 
-`--period` on `drift`, `duplicates`, `missing-bilag`, `vat-anomaly`, `mva-summary`, `rollup` and `vendor-profile` accepts `YYYY`, `YYYY-MM`, `YYYY-Qn`, `from:to` (YYYY-MM-DD), or `all`. **Unset means the current calendar year, not all history** — `window.source` records which (`flag` | `default_current_year` | `all`), and `undated_documents` counts the documents skipped for having no date. `bank-unverified` is anchored to each account's own reconciled date and takes `--as-of` instead.
+`--period` on `drift`, `duplicates`, `missing-bilag`, `recurring-gaps`, `vat-anomaly`, `mva-summary`, `rollup` and `vendor-profile` accepts `YYYY`, `YYYY-MM`, `YYYY-Qn`, `from:to` (YYYY-MM-DD), or `all`. **Unset means the current calendar year, not all history** — `window.source` records which (`flag` | `default_current_year` | `all`), and `undated_documents` counts the documents skipped for having no date. `bank-unverified` is anchored to each account's own reconciled date and takes `--as-of` instead.
 
 ## Recipes
 
@@ -167,4 +181,12 @@ Builds a posting proposal from an inbox document; pipe it to validate, then comm
 fiken-cli mva-summary --company fiken-demo --period 2026-03 --agent
 ```
 
-Reconstructs the output/input VAT view per (`vatType`, `mva_code`) so you can sanity-check before filing.
+Reconstructs the output/input VAT view per (`vatType`, `mva_code`), credit notes subtracted, and compares it with the ledger so you can sanity-check before filing.
+
+### Which term is next
+
+```bash
+fiken-cli mva-status --company fiken-demo --agent
+```
+
+Names the open and overdue terms, with due dates and what is outstanding.
