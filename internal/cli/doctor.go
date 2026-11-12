@@ -66,6 +66,7 @@ func looksLikeDoctorInterstitial(body []byte) string {
 
 func newDoctorCmd(flags *rootFlags) *cobra.Command {
 	var failOn string
+	var mirrorCompany string // PATCH(doctor-company-scope)
 	cmd := &cobra.Command{
 		Use:   "doctor",
 		Short: "Check CLI health",
@@ -248,6 +249,9 @@ func newDoctorCmd(flags *rootFlags) *cobra.Command {
 			// and a fresh/stale/unknown verdict so agents can introspect
 			// whether to trust the cached data before issuing queries.
 			report["cache"] = collectCacheReport(cmd.Context(), "")
+			// PATCH(doctor-company-scope): --company keeps only that company's
+			// mirror findings (issue #29). See doctor_mirror.go.
+			scopeMirrorFindings(report, mirrorCompany)
 
 			// Verify mode state. Surfaced so an operator who unintentionally
 			// inherits PRINTING_PRESS_VERIFY=1 (parent shell, CI runner, container
@@ -339,6 +343,8 @@ func newDoctorCmd(flags *rootFlags) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&failOn, "fail-on", "", "Exit non-zero when a health level is reached: stale, error. Default is never.")
+	// PATCH(doctor-company-scope)
+	cmd.Flags().StringVar(&mirrorCompany, "company", "", "Limit the mirror checks to one company slug")
 	return cmd
 }
 

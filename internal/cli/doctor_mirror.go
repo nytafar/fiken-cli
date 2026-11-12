@@ -22,32 +22,95 @@
 // journalEntryId collided on the primary key and one overwrote the other. The
 // repair is `sync --full --company <slug> --resources <name>`, which clears that
 // company's rows for that resource before refetching them under the correct key.
+//
+// Every finding that can be attributed names its company (issue #29). The
+// counts used to be mirror-wide only, so after `sync --full --company a` on a
+// three-company mirror the same eleven findings were still listed with a fix
+// line reading `--company <slug>`: the rows of company a were clean and the
+// findings belonged to the other two, but nothing said so and it read as a
+// failed repair. `doctor --company <slug>` keeps only that company's findings.
 package cli
 
 import (
 	"fmt"
 	"io"
 	"sort"
+	"strings"
 
 	"fiken-cli/internal/store"
 )
 
 // mirrorFinding is one disagreement, in the JSON shape the doctor report uses.
+// Company is the slug the rows belong to; it is empty for a finding that
+// cannot be attributed (a mirror-wide count, or rows that name no company).
 type mirrorFinding struct {
 	Resource string `json:"resource"`
+	Company  string `json:"company"`
 	Kind     string `json:"kind"`
 	Message  string `json:"message"`
 	Fix      string `json:"fix"`
 }
 
-func mirrorResyncHint(resource string) string {
-	return fmt.Sprintf("fiken-cli sync --full --company <slug> --resources %s", resource)
+func mirrorResyncHint(resource, company string) string {
+	if company == "" {
+		company = "<slug>"
+	}
+	return fmt.Sprintf("fiken-cli sync --full --company %s --resources %s", company, resource)
 }
 
-// mirrorInvariantFindings cross-checks the mirror's three row counts per
-// resource and reports every disagreement, plus any bare storage keys and any
-// orphaned kebab-spelled resource_type population left over from before
-// canonicalisation. Returns nil when the mirror is consistent.
+// mirrorCompanyFindings is the per-company half of the invariant for one
+// parent-keyed resource: the typed table against `resources`, and the bare
+// storage keys, each attributed to the company whose rows they are. Rows that
+// name no company are reported once, as unowned: no command reads them (every
+// detector filters on parent_id), so they distort no report, and no company's
+// resync can remove them.
+func mirrorCompanyFindings(resource string, counts []store.CompanyRowCounts) []mirrorFinding {
+	var out []mirrorFinding
+	for _, c := range counts {
+		if c.Company == "" {
+			if c.Resources == 0 && c.Typed == 0 {
+				continue
+			}
+			out = append(out, mirrorFinding{
+				Resource: resource,
+				Kind:     "unowned_rows",
+				Message: fmt.Sprintf(
+					"%d resources rows and %d %s table rows name no company. They were written before rows were stamped with their company; "+
+						"no command reads them, so they affect no report, and no company's resync removes them",
+					c.Resources, c.Typed, resource),
+			})
+			continue
+		}
+		if c.HasTyped && c.Typed != c.Resources {
+			out = append(out, mirrorFinding{
+				Resource: resource,
+				Company:  c.Company,
+				Kind:     "row_count_disagreement",
+				Message:  fmt.Sprintf("%s: resources=%d, %s table=%d", c.Company, c.Resources, resource, c.Typed),
+				Fix:      mirrorResyncHint(resource, c.Company),
+			})
+		}
+		if c.BareKeys > 0 {
+			out = append(out, mirrorFinding{
+				Resource: resource,
+				Company:  c.Company,
+				Kind:     "bare_storage_key",
+				Message: fmt.Sprintf(
+					"%s: %d of %d resources rows carry a bare id instead of id\\0<companySlug>; "+
+						"in a multi-company mirror those rows collided on the primary key and one company's data overwrote the other's",
+					c.Company, c.BareKeys, c.Resources),
+				Fix: mirrorResyncHint(resource, c.Company),
+			})
+		}
+	}
+	return out
+}
+
+// mirrorInvariantFindings cross-checks the mirror's row counts per resource
+// and reports every disagreement: per company where the resource is keyed by
+// company, mirror-wide otherwise, plus any orphaned kebab-spelled
+// resource_type population left over from before canonicalisation. Returns nil
+// when the mirror is consistent.
 func mirrorInvariantFindings(s *store.Store) []mirrorFinding {
 	if s == nil {
 		return nil
@@ -91,6 +154,34 @@ func mirrorInvariantFindings(s *store.Store) []mirrorFinding {
 			continue
 		}
 
+		// sync_state.total_count is one number for the whole mirror, so this
+		// half of the invariant has no company to name.
+		if stateCount != genericCount {
+			out = append(out, mirrorFinding{
+				Resource: canonical,
+				Kind:     "row_count_disagreement",
+				Message: fmt.Sprintf(
+					"sync_state.total_count=%d, resources=%d (all companies); a plain `fiken-cli sync` recounts it",
+					stateCount, genericCount),
+				Fix: "fiken-cli sync --resources " + canonical,
+			})
+		}
+
+		counts, perCompany, berr := s.CountByCompany(canonical)
+		if berr != nil {
+			out = append(out, mirrorFinding{
+				Resource: canonical,
+				Kind:     "mirror_unreadable",
+				Message:  fmt.Sprintf("cannot count rows per company: %v", berr),
+			})
+			continue
+		}
+		if perCompany {
+			out = append(out, mirrorCompanyFindings(canonical, counts)...)
+			continue
+		}
+
+		// No company column: only the mirror-wide typed count exists.
 		typedCount, hasTyped, terr := s.CountTypedTable(canonical)
 		if terr != nil {
 			out = append(out, mirrorFinding{
@@ -98,36 +189,14 @@ func mirrorInvariantFindings(s *store.Store) []mirrorFinding {
 				Kind:     "mirror_unreadable",
 				Message:  fmt.Sprintf("cannot count typed table: %v", terr),
 			})
-			hasTyped = false
+			continue
 		}
-
-		typedRepr := "n/a"
-		if hasTyped {
-			typedRepr = fmt.Sprintf("%d", typedCount)
-		}
-		disagrees := stateCount != genericCount || (hasTyped && typedCount != genericCount)
-		if disagrees {
+		if hasTyped && typedCount != genericCount {
 			out = append(out, mirrorFinding{
 				Resource: canonical,
 				Kind:     "row_count_disagreement",
-				Message: fmt.Sprintf(
-					"sync_state.total_count=%d, resources=%d, %s table=%s",
-					stateCount, genericCount, canonical, typedRepr),
-				Fix: mirrorResyncHint(canonical),
-			})
-		}
-
-		bare, parentKeyed, berr := s.CountBareStorageKeys(canonical)
-		if berr == nil && parentKeyed && bare > 0 {
-			out = append(out, mirrorFinding{
-				Resource: canonical,
-				Kind:     "bare_storage_key",
-				Message: fmt.Sprintf(
-					"%d of %d resources rows carry a bare id instead of id\\0<companySlug>; "+
-						"in a multi-company mirror those rows collided on the primary key and one company's data overwrote the other's. "+
-						"A scoped --full run clears that company's rows before refetching, so repair one company at a time",
-					bare, genericCount),
-				Fix: mirrorResyncHint(canonical),
+				Message:  fmt.Sprintf("resources=%d, %s table=%d (all companies)", genericCount, canonical, typedCount),
+				Fix:      mirrorResyncHint(canonical, ""),
 			})
 		}
 	}
@@ -158,14 +227,39 @@ func mirrorInvariantFindings(s *store.Store) []mirrorFinding {
 				Resource: canonical,
 				Kind:     "orphaned_kebab_rows",
 				Message: fmt.Sprintf(
-					"%d rows stored under the pre-canonicalisation resource_type %q; the canonical %q holds %d",
+					"%d rows stored under the pre-canonicalisation resource_type %q; the canonical %q holds %d. No command reads them",
 					orphaned, rt, canonical, n),
-				Fix: mirrorResyncHint(canonical),
 			})
 		}
 	}
 
 	return out
+}
+
+// scopeMirrorFindings narrows the doctor report's mirror findings to one
+// company (`doctor --company <slug>`): only findings attributed to that slug
+// stay, so a company whose rows are clean reports none, whatever state the
+// other companies in the mirror are in. An empty slug leaves the report as it
+// is. The count of what was left out is recorded so the narrowing is visible.
+func scopeMirrorFindings(report map[string]any, company string) {
+	company = strings.TrimSpace(company)
+	if company == "" {
+		return
+	}
+	cache, ok := report["cache"].(map[string]any)
+	if !ok {
+		return
+	}
+	cache["mirror_company"] = company
+	findings, _ := cache["mirror_findings"].([]map[string]any)
+	kept := []map[string]any{}
+	for _, f := range findings {
+		if c, _ := f["company"].(string); c == company {
+			kept = append(kept, f)
+		}
+	}
+	cache["mirror_findings_other_companies"] = len(findings) - len(kept)
+	cache["mirror_findings"] = kept
 }
 
 // mirrorFindingsJSON renders the findings for the machine-readable doctor report.
@@ -178,6 +272,9 @@ func mirrorFindingsJSON(findings []mirrorFinding) []map[string]any {
 		entry := map[string]any{"kind": f.Kind, "message": f.Message}
 		if f.Resource != "" {
 			entry["resource"] = f.Resource
+		}
+		if f.Company != "" {
+			entry["company"] = f.Company
 		}
 		if f.Fix != "" {
 			entry["fix"] = f.Fix
@@ -195,6 +292,14 @@ func renderMirrorInvariants(w io.Writer, rep map[string]any) {
 		return
 	}
 	findings, ok := raw.([]map[string]any)
+	if scoped, _ := rep["mirror_company"].(string); scoped != "" && ok && len(findings) == 0 {
+		fmt.Fprintf(w, "    %s mirror: no disagreements for %s", green("OK"), scoped)
+		if other, _ := rep["mirror_findings_other_companies"].(int); other > 0 {
+			fmt.Fprintf(w, " (%d for other companies or the whole mirror, not shown)", other)
+		}
+		fmt.Fprintln(w)
+		return
+	}
 	if !ok || len(findings) == 0 {
 		return
 	}
@@ -203,6 +308,9 @@ func renderMirrorInvariants(w io.Writer, rep map[string]any) {
 		resource, _ := f["resource"].(string)
 		if resource == "" {
 			resource = "-"
+		}
+		if company, _ := f["company"].(string); company != "" {
+			resource += " (" + company + ")"
 		}
 		fmt.Fprintf(w, "      - %s [%v]: %v\n", resource, f["kind"], f["message"])
 		if fix, ok := f["fix"]; ok {

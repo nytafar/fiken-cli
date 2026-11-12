@@ -1,0 +1,30 @@
+{
+  "schema_version": 2,
+  "id": "doctor-company-scope",
+  "applied_at": "2026-11-12",
+  "base_run_id": "20260609-145046",
+  "base_printing_press_version": "4.24.0",
+  "summary": "feat(doctor): mirror findings name their company, and --company limits the mirror checks to one (issue #29)",
+  "reason": "The mirror invariant in doctor compared mirror-wide counts only, so after `sync --full --company a` on a three-company mirror the same findings were still listed with the fix `sync --full --company <slug> --resources <name>`: company a's rows were clean and the findings belonged to the other companies, but nothing said so and it read as a failed repair. The generated internal/cli/doctor.go carries three lines: the mirrorCompany variable, the --company flag, and scopeMirrorFindings(report, mirrorCompany) after the cache report is built. The hand-authored internal/cli/doctor_mirror.go does the rest. For a resource keyed by company (resourceParentKeyColumns value `parent_id`), store.CountByCompany returns per-company counts of `resources` rows, bare storage keys and typed-table rows, and each disagreement becomes a finding with a `company` field and a fix line naming that slug. Rows that name no company are reported once per resource as `unowned_rows` with no fix: no command reads them and no company's resync removes them. sync_state.total_count is one number for the whole mirror, so that comparison stays mirror-wide and says so. scopeMirrorFindings keeps only the findings attributed to the given slug and records how many were left out, so a clean company reports an empty list whatever state the others are in. The duplicate typed-table rows the issue reports (each inbox document twice) were rows written under an earlier id rule, with no generic counterpart, that neither delete path removed: store.ClearCompanyResources now also deletes the company's typed rows by the typed table's parent column, and store.DeleteCompanyResourcesNotIn sweeps typed rows of the company that the complete pull did not land.",
+  "files": [
+    "internal/cli/doctor.go",
+    "internal/cli/doctor_mirror.go",
+    "internal/store/mirror_counts.go",
+    "internal/store/mirror_deletes.go",
+    "internal/cli/doctor_mirror_test.go",
+    "internal/store/mirror_company_counts_test.go"
+  ],
+  "call_sites": [
+    "PATCH(doctor-company-scope)",
+    "scopeMirrorFindings(report, mirrorCompany)",
+    "cmd.Flags().StringVar(&mirrorCompany, \"company\", \"\", \"Limit the mirror checks to one company slug\")",
+    "func scopeMirrorFindings(report map[string]any, company string) {",
+    "func mirrorCompanyFindings(resource string, counts []store.CompanyRowCounts) []mirrorFinding {",
+    "func (s *Store) CountByCompany(resourceType string) (counts []CompanyRowCounts, ok bool, err error) {",
+    "func TestMirrorFindings_NameTheCompanyTheyBelongTo(t *testing.T) {",
+    "func TestScopeMirrorFindings(t *testing.T) {",
+    "func TestClearCompanyResources_ClearsTheTypedTableToo(t *testing.T) {",
+    "func TestDeleteCompanyResourcesNotIn_SweepsTypedRowsWithNoGenericRow(t *testing.T) {"
+  ],
+  "validated_outcome": "make check green. internal/cli/doctor_mirror_test.go builds a three-company mirror in which one company is clean, one holds a bare-key journal entry and one a typed inbox row with no generic counterpart: every finding names its company, the fix line carries the slug, the clean company has none, rows naming no company are reported as unowned_rows without a fix, and scopeMirrorFindings returns an empty list for the clean company while recording how many findings it left out. internal/store/mirror_company_counts_test.go covers CountByCompany, and shows ClearCompanyResources and DeleteCompanyResourcesNotIn bringing the typed table back in step without touching another company's rows. No live API call was made."
+}

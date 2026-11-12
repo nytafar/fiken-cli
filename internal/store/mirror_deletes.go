@@ -26,10 +26,8 @@
 //     UpsertBatch writes both in one transaction, and `doctor` cross-checks the
 //     two counts — so dropping only the generic row would trade a stale mirror
 //     for a mirror that disagrees with itself, and the MCP sql tool would keep
-//     serving the deleted record out of the typed table. That
-//     ClearCompanyResources does NOT do this is a pre-existing gap in the
-//     --full --company path, not a precedent worth copying; fixing it there is
-//     a separate change.
+//     serving the deleted record out of the typed table.
+//     ClearCompanyResources clears the company's typed rows as well.
 package store
 
 import (
@@ -139,6 +137,44 @@ func (s *Store) DeleteCompanyResourcesNotIn(resourceType, slug string, keep []st
 			if _, err := tx.Exec(
 				fmt.Sprintf(`DELETE FROM "%s" WHERE id = ?`, canonical), id,
 			); err != nil {
+				return 0, err
+			}
+		}
+	}
+
+	// Typed rows that have no generic row at all (issue #29). A typed table
+	// row written under an earlier id rule (an inbox document keyed on its
+	// filename before it was keyed on documentId) has no counterpart in
+	// `resources` to drive the loop above, so it outlived every sync and the
+	// typed table held each document twice. The same proof applies: it is
+	// this company's row by its own parent column and suffix, and the
+	// complete pull did not land it.
+	if HasTypedTable(canonical) && resourceParentKeyColumns[canonical] == "parent_id" {
+		typedRows, err := tx.Query(fmt.Sprintf(`SELECT id FROM "%s" WHERE parent_id = ?`, canonical), slug)
+		if err != nil {
+			return 0, err
+		}
+		var orphans []string
+		for typedRows.Next() {
+			var id string
+			if err := typedRows.Scan(&id); err != nil {
+				typedRows.Close()
+				return 0, err
+			}
+			if !strings.HasSuffix(id, suffix) {
+				continue
+			}
+			if _, ok := keepSet[id]; !ok {
+				orphans = append(orphans, id)
+			}
+		}
+		if err := typedRows.Err(); err != nil {
+			typedRows.Close()
+			return 0, err
+		}
+		typedRows.Close()
+		for _, id := range orphans {
+			if _, err := tx.Exec(fmt.Sprintf(`DELETE FROM "%s" WHERE id = ?`, canonical), id); err != nil {
 				return 0, err
 			}
 		}
