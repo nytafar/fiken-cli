@@ -1,0 +1,25 @@
+{
+  "schema_version": 2,
+  "id": "term-commands",
+  "applied_at": "2026-11-12",
+  "base_run_id": "20260609-145046",
+  "base_printing_press_version": "4.24.0",
+  "summary": "feat(commands): register the hand-authored commands written after the print (mva-status, issue #30; recurring-gaps, issue #31)",
+  "reason": "The generated internal/cli/root.go registers the printed commands one rootCmd.AddCommand at a time, so a command the print never knew has nowhere to be registered without editing it. One line is added there, addHandAuthoredCommands(rootCmd, flags), calling the hand-authored internal/cli/novel_commands.go, which adds every command written after the print; a further command is added in that file and root.go is not touched again. mva-status (internal/cli/mva_status.go) answers which VAT terms are delivered, paid, open or overdue from the structure of the Mva-oppgjør journal entries: a delivery is the settlement entry that touches a VAT account (2700-2719) and belongs to the term its date falls in, a payment is the one that moves 2740 without touching a VAT account and belongs to the term its description names, falling back to the oldest delivered term with a balance. Due dates are one month and ten days after the term ends, 31 August for the third bi-monthly term and 10 March for a yearly term, moved off weekends and Norwegian public holidays.",
+  "files": [
+    "internal/cli/root.go",
+    "internal/cli/novel_commands.go",
+    "internal/cli/mva_status.go",
+    "internal/cli/mva_status_test.go"
+  ],
+  "call_sites": [
+    "PATCH(term-commands)",
+    "addHandAuthoredCommands(rootCmd, flags)",
+    "func addHandAuthoredCommands(root *cobra.Command, flags *rootFlags) {",
+    "root.AddCommand(newNovelMvaStatusCmd(flags))",
+    "func buildMvaStatus(terms []vatTerm, entries []map[string]json.RawMessage, today string) ([]mvaTermStatus, mvaSettlement, []Finding) {",
+    "func TestBuildMvaStatus_NamesOpenAndOverdueTerms(t *testing.T) {",
+    "func TestMvaStatus_CommandOnAMirror(t *testing.T) {"
+  ],
+  "validated_outcome": "make check green. internal/cli/mva_status_test.go: the bi-monthly terms of 2026 with their due dates (10 October a Saturday, so 12 October), Easter and leap-year cases, yearly and monthly terms; a fixture journal where one return is delivered and paid, the next delivered and unpaid and nothing delivered since names the open and overdue terms, both through the pure builder and through the command on a seeded mirror; --date reports whether the term a date falls in is closed; an annulled delivery, a zero return, a refund not yet received, an unlabelled payment, a posting into a delivered term and an unexplained 2740 balance each have a case. No live API call was made."
+}

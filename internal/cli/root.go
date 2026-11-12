@@ -306,6 +306,10 @@ See README.md or skills/fiken/SKILL.md for recipes.`, // PATCH(root-help-skill-p
 	rootCmd.AddCommand(newUserPromotedCmd(flags))
 	rootCmd.AddCommand(newVersionCmd())
 
+	// PATCH(term-commands): the hand-authored commands added after the print.
+	// One call, so a new one never needs another edit here. See novel_commands.go.
+	addHandAuthoredCommands(rootCmd, flags)
+
 	// PATCH(document-download): every add-attachment command defaults --filename
 	// to the basename of --file. Wrapping the built tree once keeps the
 	// generated multipart commands untouched. See document_download.go.
