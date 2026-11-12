@@ -10,12 +10,20 @@
 // position is total output − total input across both sides. Reads only the
 // local mirror.
 //
+// A credit note is a sale with negative lines that the `sales` resource does
+// not list: it lives under `credit_notes`, each row carrying its own `sale`
+// (issue #24). Its lines are folded into the sales buckets, so a credited
+// invoice reduces the basis and the VAT of the bucket it was sold in.
+//
 // Buckets are keyed by (vatType, mva_code) — a return is read by code, and the
 // five both-sided types carry a different code per side. A second pass
 // cross-checks the reverse-charge purchase buckets against the 2702/2712 pair
 // Fiken posted in the journal (see transaction_index.go) and reports a
 // disagreement as a finding; the summary stays an aggregate report, so those
-// findings ride along rather than turning it into a detector Report.
+// findings ride along rather than turning it into a detector Report. A third
+// pass compares the whole summary with the movement on the ledger's VAT
+// accounts in the same window: a summary that disagrees with the ledger says
+// so in a finding instead of exiting clean.
 package cli
 
 // pp:data-source local
@@ -43,20 +51,64 @@ type mvaBucket struct {
 	InputVAT     string `json:"input_vat"`
 }
 
+// mvaCreditNotes says what the credit notes in the window took off the sales
+// side, so the reduction is visible next to the buckets it was folded into.
+type mvaCreditNotes struct {
+	Count        int    `json:"count"`
+	BasisOre     int64  `json:"basis_ore"`
+	Basis        string `json:"basis"`
+	OutputVATOre int64  `json:"output_vat_ore"`
+	OutputVAT    string `json:"output_vat"`
+	// WithoutLines counts credit notes in the window that carry no sale
+	// lines to bucket. They are reported in a finding, never silently skipped.
+	WithoutLines int `json:"without_lines"`
+}
+
+// mvaLedger is the ledger side of the whole-summary cross-check: the movement
+// on the VAT accounts in the window, VAT settlement entries excluded.
+type mvaLedger struct {
+	Compared       bool   `json:"compared"`
+	JournalEntries int    `json:"journal_entries"`
+	OutputVATOre   int64  `json:"output_vat_ore"`
+	OutputVAT      string `json:"output_vat"`
+	InputVATOre    int64  `json:"input_vat_ore"`
+	InputVAT       string `json:"input_vat"`
+	NetVATOre      int64  `json:"net_vat_ore"`
+	NetVAT         string `json:"net_vat"`
+	DiffOre        int64  `json:"diff_ore"`
+	Diff           string `json:"diff"`
+	// ByType splits the movement by transactionType, so a disagreement can be
+	// traced to the kind of posting the summary does not read.
+	ByType []mvaLedgerType `json:"by_type"`
+}
+
+// mvaLedgerType is the VAT one transactionType moved in the window.
+// FromDocuments is true for the types posted from a sale, credit note or
+// purchase, which are the ones the summary buckets.
+type mvaLedgerType struct {
+	TransactionType string `json:"transaction_type"`
+	Entries         int    `json:"entries"`
+	OutputVATOre    int64  `json:"output_vat_ore"`
+	InputVATOre     int64  `json:"input_vat_ore"`
+	FromDocuments   bool   `json:"from_documents"`
+}
+
 type mvaSummaryReport struct {
-	Company             string      `json:"company"`
-	Window              Window      `json:"window"`
-	UndatedDocuments    int         `json:"undated_documents"`
-	TransactionsIndexed int         `json:"transactions_indexed"`
-	Output              []mvaBucket `json:"output"`
-	Input               []mvaBucket `json:"input"`
-	TotalOutputOre      int64       `json:"total_output_vat_ore"`
-	TotalOutput         string      `json:"total_output_vat"`
-	TotalInputOre       int64       `json:"total_input_vat_ore"`
-	TotalInput          string      `json:"total_input_vat"`
-	NetVATOre           int64       `json:"net_vat_ore"`
-	NetVAT              string      `json:"net_vat"`
-	Findings            []Finding   `json:"findings"`
+	Company             string         `json:"company"`
+	Window              Window         `json:"window"`
+	UndatedDocuments    int            `json:"undated_documents"`
+	TransactionsIndexed int            `json:"transactions_indexed"`
+	CreditNotes         mvaCreditNotes `json:"credit_notes"`
+	Ledger              mvaLedger      `json:"ledger"`
+	Output              []mvaBucket    `json:"output"`
+	Input               []mvaBucket    `json:"input"`
+	TotalOutputOre      int64          `json:"total_output_vat_ore"`
+	TotalOutput         string         `json:"total_output_vat"`
+	TotalInputOre       int64          `json:"total_input_vat_ore"`
+	TotalInput          string         `json:"total_input_vat"`
+	NetVATOre           int64          `json:"net_vat_ore"`
+	NetVAT              string         `json:"net_vat"`
+	Findings            []Finding      `json:"findings"`
 }
 
 // mvaLine is the minimal per-line shape the summarizer needs. TxID is the
@@ -229,6 +281,225 @@ func crossCheckReverseCharge(lines []mvaLine, buckets []mvaBucket, ix *txIndex) 
 	return findings
 }
 
+// creditNoteLines returns the sales-side lines of the credit notes dated in
+// the window. A credit note's `sale` holds the negative lines Fiken booked for
+// it, with the vatType the original sale used; the note's own `lines` carry a
+// percentage but no vatType, so they cannot be bucketed. The sale's date is
+// the posting date (the note's issueDate when the sale has none). A note whose
+// sale is already among the company's sales is skipped, so a mirror that ever
+// lists the two together cannot count the credit twice. Pure; no Cobra/DB.
+func creditNoteLines(notes []map[string]json.RawMessage, win Window, saleIDs map[int64]bool) (lines []mvaLine, counted, withoutLines, undated int) {
+	for _, n := range notes {
+		sale := jsonObject(n, "sale")
+		date := jsonStr(sale, "date")
+		if date == "" {
+			date = jsonStr(n, "issueDate")
+		}
+		if date == "" {
+			undated++
+			continue
+		}
+		if !win.Contains(date) {
+			continue
+		}
+		if id, ok := jsonInt(sale, "saleId"); ok && saleIDs[id] {
+			continue
+		}
+		saleLines := jsonObjects(sale, "lines")
+		if len(saleLines) == 0 {
+			withoutLines++
+			continue
+		}
+		counted++
+		txID, _ := jsonInt(sale, "transactionId")
+		// A credit reduces. The API serves the sale negative as a whole, and a
+		// note can mix signs line by line (a credited item next to a reversed
+		// discount), so the sign is decided once for the note, on its total,
+		// and never per line: a note served positive is negated in full.
+		var total int64
+		for _, ln := range saleLines {
+			net, _ := jsonInt(ln, "netPrice")
+			vat, _ := jsonInt(ln, "vat")
+			total += net + vat
+		}
+		sign := int64(1)
+		if total > 0 {
+			sign = -1
+		}
+		for _, ln := range saleLines {
+			net, _ := jsonInt(ln, "netPrice")
+			vat, _ := jsonInt(ln, "vat")
+			lines = append(lines, mvaLine{VATType: jsonStr(ln, "vatType"), BasisOre: sign * net, VATOre: sign * vat, TxID: txID})
+		}
+	}
+	return lines, counted, withoutLines, undated
+}
+
+// The ledger's VAT accounts: 2700-2709 hold output (utgående) VAT as credits
+// and 2710-2719 input (inngående) VAT as debits. 2740 is the settlement
+// account the term's balance is moved to and is not part of the movement.
+const (
+	vatOutputAccountFrom = 2700
+	vatInputAccountFrom  = 2710
+	vatAccountTo         = 2719
+)
+
+// vatSettlementType is the transactionType of the entries Fiken posts when a
+// return is delivered and when it is paid. The delivery entry empties the VAT
+// accounts onto 2740 on the term's last day, so it must be left out or the
+// movement of every delivered term sums to zero.
+const vatSettlementType = "Mva-oppgjør"
+
+// vatAccountNumber returns the four-digit ledger account of a journal line's
+// account code (`2701`, or `2701:12345` with a sub-account), 0 when it has none.
+func vatAccountNumber(code string) int {
+	if i := strings.IndexByte(code, ':'); i >= 0 {
+		code = code[:i]
+	}
+	if len(code) != 4 {
+		return 0
+	}
+	n := 0
+	for _, r := range code {
+		if r < '0' || r > '9' {
+			return 0
+		}
+		n = n*10 + int(r-'0')
+	}
+	return n
+}
+
+// ledgerVAT sums the movement on the VAT accounts over the journal entries
+// dated in the window. Signs are Fiken's (a credit is negative), so output VAT
+// is the negated sum of 2700-2709 and input VAT the sum of 2710-2719; both
+// come out positive in the ordinary case and net is output − input, the same
+// quantity the summary reports. Pure; no Cobra/DB.
+func ledgerVAT(entries []map[string]json.RawMessage, win Window) mvaLedger {
+	l := mvaLedger{ByType: []mvaLedgerType{}}
+	byType := map[string]*mvaLedgerType{}
+	for _, e := range uniqueJournalEntries(entries) {
+		typ := jsonStr(e, "transactionType")
+		if !win.Contains(jsonStr(e, "date")) || typ == vatSettlementType {
+			continue
+		}
+		l.JournalEntries++
+		var out, in int64
+		for _, ln := range jsonObjects(e, "lines") {
+			amount, _ := jsonInt(ln, "amount")
+			switch acct := vatAccountNumber(jsonStr(ln, "account")); {
+			case acct >= vatOutputAccountFrom && acct < vatInputAccountFrom:
+				out -= amount
+			case acct >= vatInputAccountFrom && acct <= vatAccountTo:
+				in += amount
+			}
+		}
+		if out == 0 && in == 0 {
+			continue
+		}
+		l.OutputVATOre += out
+		l.InputVATOre += in
+		t := byType[typ]
+		if t == nil {
+			t = &mvaLedgerType{TransactionType: typ, FromDocuments: ledgerDocumentTypes[typ]}
+			byType[typ] = t
+		}
+		t.Entries++
+		t.OutputVATOre += out
+		t.InputVATOre += in
+	}
+	for _, t := range byType {
+		l.ByType = append(l.ByType, *t)
+	}
+	sort.Slice(l.ByType, func(i, j int) bool { return l.ByType[i].TransactionType < l.ByType[j].TransactionType })
+	l.NetVATOre = l.OutputVATOre - l.InputVATOre
+	l.Compared = l.JournalEntries > 0
+	return l
+}
+
+// ledgerDocumentTypes are the transaction types whose VAT the summary can see,
+// because they are posted from a sale, a credit note or a purchase. VAT on any
+// other type (a free posting, a customs declaration, a point-of-sale
+// settlement) reaches the ledger without a document the summary buckets, and
+// is the first place to look when the two disagree.
+var ledgerDocumentTypes = map[string]bool{
+	"Salg":           true,
+	"Kreditert salg": true,
+	"Kjøp":           true,
+}
+
+// uniqueJournalEntries drops repeated copies of one journal entry. A mirror
+// that predates the per-company storage key can hold the same entry twice
+// (doctor reports it as bare_storage_key), and a ledger summed over both
+// copies is exactly double. The copy that carries a transactionType wins,
+// since the settlement entries can only be excluded when the type is known.
+// An entry without a journalEntryId is kept as it is.
+func uniqueJournalEntries(entries []map[string]json.RawMessage) []map[string]json.RawMessage {
+	index := map[int64]int{}
+	out := make([]map[string]json.RawMessage, 0, len(entries))
+	for _, e := range entries {
+		id, ok := jsonInt(e, "journalEntryId")
+		if !ok || id == 0 {
+			out = append(out, e)
+			continue
+		}
+		if i, dup := index[id]; dup {
+			if jsonStr(out[i], "transactionType") == "" && jsonStr(e, "transactionType") != "" {
+				out[i] = e
+			}
+			continue
+		}
+		index[id] = len(out)
+		out = append(out, e)
+	}
+	return out
+}
+
+// mvaLedgerToleranceOre is the slack on the whole-summary comparison. The
+// return is filed in whole kroner and Fiken rounds per posting where the
+// summary rounds per line, so anything under a krone is arithmetic.
+const mvaLedgerToleranceOre = 100
+
+// mvaKindLedgerMismatch is emitted when the summary's net VAT disagrees with
+// the movement on the ledger's VAT accounts for the same window.
+const mvaKindLedgerMismatch = "ledger_vat_mismatch"
+
+// mvaKindCreditNoteWithoutLines is emitted when a credit note in the window
+// has no sale lines, so its reduction could not be bucketed.
+const mvaKindCreditNoteWithoutLines = "credit_note_without_lines"
+
+// crossCheckLedger compares the summary's totals with the ledger's. Nothing is
+// reported when no journal entry was dated in the window: nothing was
+// compared, which is also what keeps an unsynced `journal_entries` silent
+// rather than a false alarm on every run. Pure; no Cobra/DB.
+func crossCheckLedger(totalOut, totalIn int64, ledger *mvaLedger) []Finding {
+	ledger.OutputVAT, ledger.InputVAT, ledger.NetVAT = kr(ledger.OutputVATOre), kr(ledger.InputVATOre), kr(ledger.NetVATOre)
+	if !ledger.Compared {
+		ledger.Diff = kr(0)
+		return nil
+	}
+	ledger.DiffOre = (totalOut - totalIn) - ledger.NetVATOre
+	ledger.Diff = kr(ledger.DiffOre)
+	if absInt64(ledger.DiffOre) <= mvaLedgerToleranceOre {
+		return nil
+	}
+	return []Finding{{
+		Kind:      mvaKindLedgerMismatch,
+		Severity:  SeverityWarning,
+		DocType:   "summary",
+		ImpactOre: ledger.DiffOre,
+		Detail: map[string]any{
+			"summary_net_vat_ore":    totalOut - totalIn,
+			"ledger_net_vat_ore":     ledger.NetVATOre,
+			"summary_output_vat_ore": totalOut,
+			"ledger_output_vat_ore":  ledger.OutputVATOre,
+			"summary_input_vat_ore":  totalIn,
+			"ledger_input_vat_ore":   ledger.InputVATOre,
+			"note": "the ledger is what the return is filed from; look for documents posted in this window " +
+				"that the mirror does not hold (run sync) or postings made directly on a VAT account",
+		},
+	}}
+}
+
 func newNovelMvaSummaryCmd(flags *rootFlags) *cobra.Command {
 	var flagCompany string
 	var flagPeriod string
@@ -237,10 +508,13 @@ func newNovelMvaSummaryCmd(flags *rootFlags) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "mva-summary",
 		Short: "Summarize output/input VAT per VAT type (a VAT-return-shaped view)",
-		Long: "Buckets sales and purchase lines by VAT type, mapping each line onto the basis,\n" +
-			"output VAT and input VAT its vatType's regime implies (a reverse-charge purchase\n" +
-			"carries both sides; a basis line's VAT is computed, not read off the line), and\n" +
-			"reports the net VAT position (total output − total input).\n" +
+		Long: "Buckets sales, credit note and purchase lines by VAT type, mapping each line onto\n" +
+			"the basis, output VAT and input VAT its vatType's regime implies (a reverse-charge\n" +
+			"purchase carries both sides; a basis line's VAT is computed, not read off the line),\n" +
+			"and reports the net VAT position (total output − total input). Credit notes reduce\n" +
+			"the sales bucket their lines belong to. The totals are compared with the movement on\n" +
+			"the ledger's VAT accounts (2700-2719) in the same window, and a difference above one\n" +
+			"krone is reported as a ledger_vat_mismatch finding.\n" +
 			"--period scopes to a term and defaults to the current year; pass `all` to summarize\n" +
 			"everything. Reads the local mirror.",
 		Example: strings.Trim(`
@@ -311,28 +585,72 @@ func newNovelMvaSummaryCmd(flags *rootFlags) *cobra.Command {
 				return err
 			}
 
+			// Credit notes: negative sales lines the `sales` resource does not
+			// carry. Folded into the sales side before bucketing.
+			notes, err := loadCompanyResources(cmd.Context(), db, "credit_notes", slug)
+			if err != nil {
+				return err
+			}
+			saleIDs := map[int64]bool{}
+			for _, sale := range sales {
+				if id, ok := jsonInt(sale, "saleId"); ok {
+					saleIDs[id] = true
+				}
+			}
+			creditLines, creditCount, creditWithoutLines, creditUndated := creditNoteLines(notes, win, saleIDs)
+			undated += creditUndated
+			_, creditOut, _ := summarizeMVA(creditLines, fikencore.SideSales)
+			var creditBasis int64
+			for _, ln := range creditLines {
+				creditBasis += ln.BasisOre
+			}
+
+			entries, err := loadCompanyResources(cmd.Context(), db, "journal_entries", slug)
+			if err != nil {
+				return err
+			}
+			ledger := ledgerVAT(entries, win)
+
 			// A purchase can carry output VAT (reverse charge), so the totals
 			// are taken across both sides, not one per side.
 			purchLines := collect(purchases)
-			salesBuckets, salesOut, salesIn := summarizeMVA(collect(sales), fikencore.SideSales)
+			salesBuckets, salesOut, salesIn := summarizeMVA(append(collect(sales), creditLines...), fikencore.SideSales)
 			purchBuckets, purchOut, purchIn := summarizeMVA(purchLines, fikencore.SidePurchases)
 			totalOut := salesOut + purchOut
 			totalIn := salesIn + purchIn
 			net := totalOut - totalIn
+			findings := crossCheckReverseCharge(purchLines, purchBuckets, ix)
+			findings = append(findings, crossCheckLedger(totalOut, totalIn, &ledger)...)
+			if creditWithoutLines > 0 {
+				findings = append(findings, Finding{
+					Kind:     mvaKindCreditNoteWithoutLines,
+					Severity: SeverityWarning,
+					DocType:  "credit_note",
+					Detail: map[string]any{
+						"count": creditWithoutLines,
+						"note":  "credit notes in the window carry no sale lines and were not subtracted; run sync --full --resources credit_notes",
+					},
+				})
+			}
 			report := mvaSummaryReport{
 				Company:             slug,
 				Window:              win,
 				UndatedDocuments:    undated,
 				TransactionsIndexed: ix.count(),
-				Output:              salesBuckets,
-				Input:               purchBuckets,
-				TotalOutputOre:      totalOut,
-				TotalOutput:         kr(totalOut),
-				TotalInputOre:       totalIn,
-				TotalInput:          kr(totalIn),
-				NetVATOre:           net,
-				NetVAT:              kr(net),
-				Findings:            crossCheckReverseCharge(purchLines, purchBuckets, ix),
+				CreditNotes: mvaCreditNotes{
+					Count: creditCount, BasisOre: creditBasis, Basis: kr(creditBasis),
+					OutputVATOre: creditOut, OutputVAT: kr(creditOut), WithoutLines: creditWithoutLines,
+				},
+				Ledger:         ledger,
+				Output:         salesBuckets,
+				Input:          purchBuckets,
+				TotalOutputOre: totalOut,
+				TotalOutput:    kr(totalOut),
+				TotalInputOre:  totalIn,
+				TotalInput:     kr(totalIn),
+				NetVATOre:      net,
+				NetVAT:         kr(net),
+				Findings:       findings,
 			}
 			return emitFiken(cmd, flags, report, func() {
 				w := cmd.OutOrStdout()
@@ -358,16 +676,51 @@ func newNovelMvaSummaryCmd(flags *rootFlags) *cobra.Command {
 							b.VATType, b.Regime, code, b.Basis, b.OutputVAT, b.InputVAT)
 					}
 				}
-				printBuckets("Sales lines", report.Output)
+				printBuckets("Sales lines (credit notes subtracted)", report.Output)
+				if cn := report.CreditNotes; cn.Count > 0 || cn.WithoutLines > 0 {
+					fmt.Fprintf(w, "  of which %d credit note(s): basis %s kr, utg %s kr", cn.Count, cn.Basis, cn.OutputVAT)
+					if cn.WithoutLines > 0 {
+						fmt.Fprintf(w, "; %d more had no lines and were NOT subtracted", cn.WithoutLines)
+					}
+					fmt.Fprintln(w)
+				}
 				fmt.Fprintln(w)
 				printBuckets("Purchase lines", report.Input)
-				if len(report.Findings) > 0 {
+				fmt.Fprintln(w)
+				switch l := report.Ledger; {
+				case !l.Compared:
+					fmt.Fprintln(w, "Ledger check: no journal entries in this window, nothing compared")
+				case absInt64(l.DiffOre) <= mvaLedgerToleranceOre:
+					fmt.Fprintf(w, "Ledger check: agrees with accounts 2700-2719 (net %s kr over %d journal entries)\n", l.NetVAT, l.JournalEntries)
+				default:
+					fmt.Fprintf(w, "Ledger check: DISAGREES with accounts 2700-2719. Summary net %s kr, ledger net %s kr, diff %s kr\n",
+						report.NetVAT, l.NetVAT, l.Diff)
+					fmt.Fprintf(w, "  ledger utg %s kr, inng %s kr. The ledger is what the return is filed from.\n", l.OutputVAT, l.InputVAT)
+					for _, t := range l.ByType {
+						if t.FromDocuments {
+							continue
+						}
+						name := t.TransactionType
+						if name == "" {
+							name = "(no transaction type)"
+						}
+						fmt.Fprintf(w, "  not from a sale or purchase: %-24s %4d entries   utg %12s kr   inng %12s kr\n",
+							name, t.Entries, kr(t.OutputVATOre), kr(t.InputVATOre))
+					}
+				}
+				var reverse []Finding
+				for _, f := range report.Findings {
+					if f.Kind == mvaKindReverseChargeMismatch {
+						reverse = append(reverse, f)
+					}
+				}
+				if len(reverse) > 0 {
 					ore := func(f Finding, key string) string {
 						v, _ := f.Detail[key].(int64)
 						return kr(v)
 					}
-					fmt.Fprintf(w, "\nJournal cross-check (%d):\n", len(report.Findings))
-					for _, f := range report.Findings {
+					fmt.Fprintf(w, "\nJournal cross-check (%d):\n", len(reverse))
+					for _, f := range reverse {
 						fmt.Fprintf(w, "  %-55s kode %-4v computed utg %12s kr   journal %12s kr   diff %12s kr (%v transaction(s))\n",
 							f.VATType, f.Detail["mva_code"],
 							ore(f, "bucket_output_vat_ore"), ore(f, "journal_vat_ore"),

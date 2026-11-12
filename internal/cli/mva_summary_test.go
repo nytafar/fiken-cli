@@ -4,6 +4,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"testing"
 
 	"fiken-cli/internal/fikencore"
@@ -292,5 +293,192 @@ func TestCrossCheckReverseCharge_SkipsImportBasis(t *testing.T) {
 		if !isForeignServiceCode(c) {
 			t.Errorf("code %d should be foreign service", c)
 		}
+	}
+}
+
+// ---- Credit notes and the ledger cross-check (issue #24) ----
+
+// creditFixture is one term of an invented book. Two invoices of 10 000 kr
+// + 25 % each; the first is credited in full on its own date and the second
+// in part. One domestic purchase. The journal carries the same postings, plus
+// the settlement entry Fiken makes when the return is delivered.
+var creditFixture = map[string]string{
+	"sales": `[
+	  {"saleId": 1, "date": "2026-03-10", "transactionId": 101, "lines": [{"netPrice": 1000000, "vat": 250000, "vatType": "HIGH", "account": "3000"}]},
+	  {"saleId": 2, "date": "2026-03-20", "transactionId": 102, "lines": [{"netPrice": 1000000, "vat": 250000, "vatType": "HIGH", "account": "3000"}]}
+	]`,
+	"credit_notes": `[
+	  {"creditNoteId": 11, "issueDate": "2026-03-10", "associatedInvoiceId": 1, "net": -1000000, "vat": -250000,
+	   "sale": {"saleId": 91, "date": "2026-03-10", "transactionId": 191, "lines": [{"netPrice": -1000000, "vat": -250000, "vatType": "HIGH", "account": "3000"}]}},
+	  {"creditNoteId": 12, "issueDate": "2026-04-02", "associatedInvoiceId": 2, "net": -200000, "vat": -50000,
+	   "sale": {"saleId": 92, "date": "2026-04-02", "transactionId": 192, "lines": [{"netPrice": -200000, "vat": -50000, "vatType": "HIGH", "account": "3000"}]}},
+	  {"creditNoteId": 13, "issueDate": "2026-06-01", "associatedInvoiceId": 2, "net": -100000, "vat": -25000,
+	   "sale": {"saleId": 93, "date": "2026-06-01", "transactionId": 193, "lines": [{"netPrice": -100000, "vat": -25000, "vatType": "HIGH", "account": "3000"}]}}
+	]`,
+	"purchases": `[
+	  {"purchaseId": 21, "date": "2026-03-15", "transactionId": 121, "lines": [{"netPrice": 400000, "vat": 100000, "vatType": "HIGH", "account": "6540"}]}
+	]`,
+	"journal_entries": `[
+	  {"journalEntryId": 1, "date": "2026-03-10", "transactionType": "Salg", "lines": [{"amount": 1250000, "account": "1500:10001"}, {"amount": -250000, "account": "2701"}, {"amount": -1000000, "account": "3000"}]},
+	  {"journalEntryId": 2, "date": "2026-03-20", "transactionType": "Salg", "lines": [{"amount": 1250000, "account": "1500:10002"}, {"amount": -250000, "account": "2701"}, {"amount": -1000000, "account": "3000"}]},
+	  {"journalEntryId": 3, "date": "2026-03-10", "transactionType": "Kreditert salg", "lines": [{"amount": -1250000, "account": "1500:10001"}, {"amount": 250000, "account": "2701"}, {"amount": 1000000, "account": "3000"}]},
+	  {"journalEntryId": 4, "date": "2026-04-02", "transactionType": "Kreditert salg", "lines": [{"amount": -250000, "account": "1500:10002"}, {"amount": 50000, "account": "2701"}, {"amount": 200000, "account": "3000"}]},
+	  {"journalEntryId": 5, "date": "2026-03-15", "transactionType": "Kjøp", "lines": [{"amount": -500000, "account": "2400:20001"}, {"amount": 100000, "account": "2711"}, {"amount": 400000, "account": "6540"}]},
+	  {"journalEntryId": 6, "date": "2026-04-30", "transactionType": "Mva-oppgjør", "description": "Overføring etter mva-melding for mar-apr 2026",
+	   "lines": [{"amount": 200000, "account": "2701"}, {"amount": -100000, "account": "2711"}, {"amount": -100000, "account": "2740"}]},
+	  {"journalEntryId": 7, "date": "2026-06-01", "transactionType": "Kreditert salg", "lines": [{"amount": -125000, "account": "1500:10002"}, {"amount": 25000, "account": "2701"}, {"amount": 100000, "account": "3000"}]}
+	]`,
+}
+
+func TestMvaSummary_CreditNotesReduceOutputVATToTheLedger(t *testing.T) {
+	var rep mvaSummaryReport
+	runOnMirror(t, seedMirror(t, creditFixture), &rep, "mva-summary", "--period", "2026-03-01:2026-04-30")
+
+	// Two sales at 2 500 kr VAT, one credited in full and one by 500 kr.
+	if rep.TotalOutputOre != 200000 {
+		t.Fatalf("output VAT = %d øre, want 200000 (500000 sold, 300000 credited)", rep.TotalOutputOre)
+	}
+	if rep.Ledger.OutputVATOre != rep.TotalOutputOre {
+		t.Fatalf("summary output %d øre does not equal the ledger's 27xx movement %d øre", rep.TotalOutputOre, rep.Ledger.OutputVATOre)
+	}
+	if rep.CreditNotes.Count != 2 || rep.CreditNotes.OutputVATOre != -300000 || rep.CreditNotes.BasisOre != -1200000 {
+		t.Fatalf("credit_notes = %+v, want the two notes in the window: basis -1200000, VAT -300000", rep.CreditNotes)
+	}
+	if len(rep.Output) != 1 || rep.Output[0].BasisOre != 800000 || rep.Output[0].OutputVATOre != 200000 {
+		t.Fatalf("sales buckets = %+v, want one HIGH bucket of basis 800000 and VAT 200000", rep.Output)
+	}
+	if rep.NetVATOre != 100000 || rep.Ledger.NetVATOre != 100000 || rep.Ledger.DiffOre != 0 || !rep.Ledger.Compared {
+		t.Fatalf("net = %d, ledger = %+v; want both 100000 and no difference", rep.NetVATOre, rep.Ledger)
+	}
+	if len(rep.Findings) != 0 {
+		t.Fatalf("a summary that agrees with the ledger must carry no finding: %+v", rep.Findings)
+	}
+}
+
+func TestMvaSummary_DisagreementWithTheLedgerIsAFinding(t *testing.T) {
+	// The same book with the credit notes missing from the mirror: the
+	// summary now overstates output VAT, and must say so.
+	fixture := map[string]string{}
+	for k, v := range creditFixture {
+		fixture[k] = v
+	}
+	fixture["credit_notes"] = `[]`
+
+	var rep mvaSummaryReport
+	runOnMirror(t, seedMirror(t, fixture), &rep, "mva-summary", "--period", "2026-03-01:2026-04-30")
+	if rep.TotalOutputOre != 500000 {
+		t.Fatalf("output VAT = %d, want the uncredited 500000", rep.TotalOutputOre)
+	}
+	if len(rep.Findings) != 1 {
+		t.Fatalf("findings = %+v, want exactly the ledger mismatch", rep.Findings)
+	}
+	f := rep.Findings[0]
+	if f.Kind != "ledger_vat_mismatch" || f.Severity != SeverityWarning || f.ImpactOre != 300000 {
+		t.Fatalf("finding = %+v, want a ledger_vat_mismatch warning of 300000 øre", f)
+	}
+}
+
+func TestCreditNoteLines(t *testing.T) {
+	win := Window{From: "2026-03-01", To: "2026-04-30"}
+	notes := func(s string) []map[string]json.RawMessage { return txRows(t, s) }
+
+	t.Run("a note mixing signs keeps each line's sign", func(t *testing.T) {
+		// A credited item and the reversal of the discount it was sold with.
+		lines, counted, _, _ := creditNoteLines(notes(`[{"issueDate": "2026-03-05", "sale": {"saleId": 1, "date": "2026-03-05", "lines": [
+		  {"netPrice": -100000, "vat": -25000, "vatType": "HIGH"}, {"netPrice": 10000, "vat": 2500, "vatType": "HIGH"}]}}]`), win, nil)
+		if counted != 1 || len(lines) != 2 || lines[0].VATOre != -25000 || lines[1].VATOre != 2500 {
+			t.Fatalf("lines = %+v", lines)
+		}
+	})
+	t.Run("a note served positive is negated as a whole", func(t *testing.T) {
+		lines, _, _, _ := creditNoteLines(notes(`[{"issueDate": "2026-03-05", "sale": {"saleId": 1, "date": "2026-03-05", "lines": [
+		  {"netPrice": 100000, "vat": 25000, "vatType": "HIGH"}]}}]`), win, nil)
+		if len(lines) != 1 || lines[0].BasisOre != -100000 || lines[0].VATOre != -25000 {
+			t.Fatalf("lines = %+v, want the line negated", lines)
+		}
+	})
+	t.Run("outside the window, undated, already a sale, without lines", func(t *testing.T) {
+		lines, counted, withoutLines, undated := creditNoteLines(notes(`[
+		  {"issueDate": "2026-05-01", "sale": {"saleId": 1, "date": "2026-05-01", "lines": [{"netPrice": -1, "vat": 0, "vatType": "HIGH"}]}},
+		  {"sale": {"saleId": 2, "lines": [{"netPrice": -1, "vat": 0, "vatType": "HIGH"}]}},
+		  {"issueDate": "2026-03-05", "sale": {"saleId": 3, "date": "2026-03-05", "lines": [{"netPrice": -1, "vat": 0, "vatType": "HIGH"}]}},
+		  {"issueDate": "2026-03-06", "lines": [{"net": -100, "vat": -25, "vatInPercent": 25}]}
+		]`), win, map[int64]bool{3: true})
+		if len(lines) != 0 || counted != 0 || withoutLines != 1 || undated != 1 {
+			t.Fatalf("lines=%d counted=%d withoutLines=%d undated=%d; want 0/0/1/1", len(lines), counted, withoutLines, undated)
+		}
+	})
+	t.Run("the note's issue date places a sale that has no date", func(t *testing.T) {
+		_, counted, _, _ := creditNoteLines(notes(`[{"issueDate": "2026-03-05", "sale": {"saleId": 1, "lines": [{"netPrice": -1, "vat": 0, "vatType": "HIGH"}]}}]`), win, nil)
+		if counted != 1 {
+			t.Fatalf("counted = %d, want 1", counted)
+		}
+	})
+}
+
+func TestLedgerVAT(t *testing.T) {
+	win := Window{From: "2026-03-01", To: "2026-04-30"}
+	entries := txRows(t, `[
+	  {"journalEntryId": 1, "date": "2026-03-10", "transactionType": "Salg", "lines": [{"amount": -2500, "account": "2701"}, {"amount": -100, "account": "2703:5"}]},
+	  {"journalEntryId": 2, "date": "2026-03-11", "transactionType": "Kjøp", "lines": [{"amount": 1000, "account": "2711"}, {"amount": -300, "account": "2702"}, {"amount": 300, "account": "2712"}]},
+	  {"journalEntryId": 3, "date": "2026-04-30", "transactionType": "Mva-oppgjør", "lines": [{"amount": 2900, "account": "2701"}, {"amount": -1300, "account": "2711"}]},
+	  {"journalEntryId": 4, "date": "2026-03-12", "transactionType": "Fri", "lines": [{"amount": -700, "account": "2701"}, {"amount": 9999, "account": "2740"}, {"amount": 5, "account": "27"}]},
+	  {"journalEntryId": 5, "date": "2026-05-01", "transactionType": "Salg", "lines": [{"amount": -9000, "account": "2701"}]},
+	  {"journalEntryId": 1, "date": "2026-03-10", "lines": [{"amount": -2500, "account": "2701"}, {"amount": -100, "account": "2703:5"}]},
+	  {"journalEntryId": 3, "date": "2026-04-30", "lines": [{"amount": 2900, "account": "2701"}, {"amount": -1300, "account": "2711"}]},
+	  {"journalEntryId": 6, "date": "2026-03-13", "transactionType": "Betalingsoppgjør", "lines": [{"amount": 100, "account": "1920"}]}
+	]`)
+	l := ledgerVAT(entries, win)
+	// 2500 + 100 + 300 + 700 of output; 1000 + 300 of input. The settlement
+	// entry, the entry outside the window, 2740 and the repeated copies of
+	// entries 1 and 3 (one of them an untyped copy of the settlement) are out.
+	if l.OutputVATOre != 3600 || l.InputVATOre != 1300 || l.NetVATOre != 2300 {
+		t.Fatalf("ledger = %+v, want output 3600, input 1300, net 2300", l)
+	}
+	if !l.Compared || l.JournalEntries != 4 {
+		t.Fatalf("journal entries = %d compared = %v, want 4 entries in the window", l.JournalEntries, l.Compared)
+	}
+	byType := map[string]mvaLedgerType{}
+	for _, bt := range l.ByType {
+		byType[bt.TransactionType] = bt
+	}
+	if len(byType) != 3 || !byType["Salg"].FromDocuments || !byType["Kjøp"].FromDocuments || byType["Fri"].FromDocuments || byType["Fri"].OutputVATOre != 700 {
+		t.Fatalf("by_type = %+v, want Salg and Kjøp from documents and Fri (700 øre) not", l.ByType)
+	}
+
+	if empty := ledgerVAT(nil, win); empty.Compared || empty.ByType == nil {
+		t.Fatalf("an empty journal must read as not compared with an empty by_type: %+v", empty)
+	}
+}
+
+func TestCrossCheckLedger(t *testing.T) {
+	tests := []struct {
+		name           string
+		out, in        int64
+		ledger         mvaLedger
+		wantFinding    bool
+		wantImpactOre  int64
+		wantLedgerDiff int64
+	}{
+		{"agrees", 5000, 2000, mvaLedger{Compared: true, NetVATOre: 3000}, false, 0, 0},
+		{"under a krone is rounding", 5000, 2000, mvaLedger{Compared: true, NetVATOre: 2901}, false, 0, 99},
+		{"over a krone is a finding", 5000, 2000, mvaLedger{Compared: true, NetVATOre: 2800}, true, 200, 200},
+		{"the summary can be short as well", 5000, 2000, mvaLedger{Compared: true, NetVATOre: 9000}, true, -6000, -6000},
+		{"nothing to compare, nothing reported", 5000, 2000, mvaLedger{}, false, 0, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ledger := tt.ledger
+			got := crossCheckLedger(tt.out, tt.in, &ledger)
+			if (len(got) == 1) != tt.wantFinding {
+				t.Fatalf("findings = %+v, want finding = %v", got, tt.wantFinding)
+			}
+			if ledger.DiffOre != tt.wantLedgerDiff {
+				t.Fatalf("diff = %d, want %d", ledger.DiffOre, tt.wantLedgerDiff)
+			}
+			if tt.wantFinding && (got[0].Kind != "ledger_vat_mismatch" || got[0].ImpactOre != tt.wantImpactOre) {
+				t.Fatalf("finding = %+v, want impact %d", got[0], tt.wantImpactOre)
+			}
+		})
 	}
 }
