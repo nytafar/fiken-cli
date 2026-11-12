@@ -46,7 +46,7 @@ The first line installs the latest release binary into `~/.local/bin`, checksum-
 The second installs both skills, `fiken` and `fiken-superforing`, through
 [`npx skills`](https://skills.sh/).
 
-The skills in this repository describe `fiken-cli` 2.2.0 and say so in their frontmatter.
+The skills in this repository describe `fiken-cli` 2.3.0 and say so in their frontmatter.
 `fiken-cli doctor` tells you when a newer release is out and when the binary is older than
 an installed skill needs, with the command to upgrade. If the installer gave you an older
 release than the skills describe, build from a clone:

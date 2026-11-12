@@ -4,6 +4,8 @@ This file is maintained by printing-press-library release automation. Do not han
 
 ## Unreleased
 
+## 2.3.0 - 2026-11-12
+
 ### Added
 
 - `fiken-superforing`: `superforing.mjs probe` reports what answers on the DevTools port and refuses an Electron app; `list --buttons` prints each open line with its buttons; `book` takes one open line from purchase body to confirmed line (checks against the line, duplicate guard on supplier and invoice number, attach, inbox delete, reload, confirm, logged); `--reload` on the read commands.

@@ -7,7 +7,7 @@ argument-hint: "<company-slug> <fra> <til> [surface: chrome|cdp]"
 allowed-tools: "Read Bash mcp__claude-in-chrome__*"
 metadata:
   fiken-cli:
-    requires: "2.2.0"
+    requires: "2.3.0"
 ---
 
 # Fiken Superføring

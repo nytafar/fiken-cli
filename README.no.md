@@ -46,7 +46,7 @@ Første linje installerer siste utgitte versjon i `~/.local/bin` og kontrollerer
 Andre linje installerer begge skills, `fiken` og `fiken-superforing`, gjennom
 [`npx skills`](https://skills.sh/).
 
-Skillene i dette repoet beskriver `fiken-cli` 2.2.0, og det står i hodet på hver av dem.
+Skillene i dette repoet beskriver `fiken-cli` 2.3.0, og det står i hodet på hver av dem.
 `fiken-cli doctor` sier fra når det finnes en nyere utgivelse, og når programmet er eldre
 enn en installert skill krever, sammen med kommandoen som oppgraderer. Ga installasjonen
 deg en eldre versjon enn skillene beskriver, bygger du fra en klone:

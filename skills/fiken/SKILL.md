@@ -7,7 +7,7 @@ argument-hint: "<command> [args] | install cli|mcp"
 allowed-tools: "Read Bash"
 metadata:
   fiken-cli:
-    requires: "2.2.0"
+    requires: "2.3.0"
   openclaw:
     requires:
       bins:
@@ -28,7 +28,7 @@ curl -fsSL https://raw.githubusercontent.com/nytafar/fiken-cli/main/install.sh |
 The installer verifies the release checksum and puts `fiken-cli` in `~/.local/bin`.
 Verify: `fiken-cli --version`. If it reports "command not found", `~/.local/bin` is not on `$PATH` — add it. Do not proceed with skill commands until verification succeeds.
 
-**Check the version once per session.** This skill describes fiken-cli **2.2.0** and states it in its frontmatter (`metadata.fiken-cli.requires`). `doctor` does the comparison:
+**Check the version once per session.** This skill describes fiken-cli **2.3.0** and states it in its frontmatter (`metadata.fiken-cli.requires`). `doctor` does the comparison:
 
 ```bash
 fiken-cli doctor --json   # .update_available, .latest_release, .skills[] with requires / satisfied, .upgrade_command
