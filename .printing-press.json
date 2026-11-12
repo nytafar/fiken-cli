@@ -80,7 +80,7 @@
     {
       "name": "MVA / VAT-period summary",
       "command": "mva-summary",
-      "description": "Reconstructs a VAT-return-shaped view from local lines: net basis and output/input VAT bucketed by (vatType, mva_code), plus findings for reverse-charge journal mismatches, for any period."
+      "description": "Reconstructs a VAT-return-shaped view from local lines: net basis and output/input VAT bucketed by (vatType, mva_code), credit notes subtracted, plus findings for reverse-charge journal mismatches and for a total that disagrees with the ledger's VAT accounts, for any period."
     },
     {
       "name": "Period BI rollup",
@@ -115,7 +115,17 @@
     {
       "name": "Missing-bilag report",
       "command": "missing-bilag",
-      "description": "Lists purchases and journal entries in a period that have no attached documentation (empty attachments), ranked by document amount."
+      "description": "Lists the postings in a period that need their own bilag and have none: purchases, sales and free postings. Payments, settlements, salary and system entries are counted per class, not reported."
+    },
+    {
+      "name": "MVA term status",
+      "command": "mva-status",
+      "description": "Shows which MVA terms are delivered, paid, open or overdue, with due dates, amounts and what sits on the VAT accounts; --date says whether a date's term is closed."
+    },
+    {
+      "name": "Recurring-supplier gap finder",
+      "command": "recurring-gaps",
+      "description": "Lists suppliers booked month after month that have a month with no purchase, with the usual amount and the last booking: where an unbooked subscription hides."
     },
     {
       "name": "Vendor posting-history profile",

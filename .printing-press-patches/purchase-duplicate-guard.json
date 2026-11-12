@@ -1,0 +1,31 @@
+{
+  "schema_version": 2,
+  "id": "purchase-duplicate-guard",
+  "applied_at": "2026-11-12",
+  "base_run_id": "20260609-145046",
+  "base_printing_press_version": "4.24.0",
+  "summary": "feat(purchases): refuse a create whose supplier already has the invoice number (issue #25)",
+  "reason": "Fiken accepts a second purchase with the same supplier and invoice number (`identifier`) silently, and the printed `purchases create` posts whatever it is given. `commit` dedupes against its own idempotency map, which knows nothing of a purchase made in the web UI, through `purchases create` or from another machine. Receipts still listed as unused in the inbox were already booked, and only a manual lookup prevented a double booking. Two generated lines in internal/cli/purchases_create.go carry the fix: guardDuplicatePurchase(cmd, flags, args[0], path, body) immediately before c.PostWithParams, and addPurchaseDuplicateFlags(cmd) where the flags are registered. Everything else is the hand-authored internal/cli/purchase_duplicate.go. The guard runs when the body has an identifier. It reads the live API for purchases dated within 92 days either side of the new one (the purchases list has date filters but none on identifier or supplier), and the local mirror for every date; a mirror hit the live window did not already return is re-read from the API by id and dropped on 404 or when it no longer matches, because the mirror can still hold a purchase deleted since the last full sync. A match is the same supplier contactId and the same identifier after trimming and case folding; a purchase marked deleted never matches, and a cash purchase (no supplier) matches only other cash purchases. A hit returns a cliError with exit code 9 (duplicateExitCode, distinct from api 5 and the write guard 8), names each existing purchase with its date and paid state, and in JSON mode prints {success:false, reason:duplicate_purchase, existing:[…]}. The root flag --idempotent turns the refusal into a successful no-op envelope carrying the existing id; --allow-duplicate skips the lookup. A failed lookup refuses as well, with a hint to the override: a blind create is the failure the guard removes. The lookup uses a client with DryRun forced off, so --dry-run reports the refusal too; under PRINTING_PRESS_VERIFY it is skipped because the verifier has no network. The hand-authored commit.go calls checkDuplicatePurchase for a purchase proposal unless its own idempotency map already holds the source as committed (that answer keeps precedence), and prepare.go reports `already_booked` for an inbox document whose filename is on a purchase attachment or whose name carries a purchase's invoice number.",
+  "files": [
+    "internal/cli/purchases_create.go",
+    "internal/cli/purchase_duplicate.go",
+    "internal/cli/commit.go",
+    "internal/cli/prepare.go",
+    "internal/cli/purchase_duplicate_test.go"
+  ],
+  "call_sites": [
+    "PATCH(purchase-duplicate-guard)",
+    "if done, gerr := guardDuplicatePurchase(cmd, flags, args[0], path, body); done || gerr != nil {",
+    "addPurchaseDuplicateFlags(cmd) // PATCH(purchase-duplicate-guard)",
+    "func guardDuplicatePurchase(cmd *cobra.Command, flags *rootFlags, slug, path string, body map[string]any) (done bool, err error) {",
+    "func matchExistingPurchases(candidates []map[string]json.RawMessage, supplierID int64, identifier, source string) []existingPurchase {",
+    "const duplicateExitCode = 9",
+    "verdict, derr := checkDuplicatePurchase(cmd.Context(), flags, p.CompanySlug, body, allowDuplicate)",
+    "rep.AlreadyBooked = inboxAlreadyBooked(rep.InboxDoc, purchases)",
+    "func TestPurchasesCreate_RefusesExistingInvoiceNumber(t *testing.T) {",
+    "func TestPurchasesCreate_IdempotentIsANoOpThatNamesTheExistingID(t *testing.T) {",
+    "func TestPurchasesCreate_FailedLookupRefuses(t *testing.T) {",
+    "func TestCommit_RefusesAPurchaseTheSupplierAlreadyHas(t *testing.T) {"
+  ],
+  "validated_outcome": "make check green. internal/cli/purchase_duplicate_test.go drives the real command tree against an httptest Fiken whose purchases list holds the invoice number on the same supplier (paid), on another supplier, on a deleted purchase and a different number on the same supplier: `purchases create` exits 9 without posting and names only the first, with its date and paid state, and the lookup query carries the ±92 day window; --idempotent succeeds without posting and reports the existing id; --allow-duplicate posts with no lookup; a new invoice number posts; --dry-run reports the refusal; a lookup that 404s refuses without posting. `commit` refuses the same proposal with exit 9, its dry run reports would_commit false with the reason, and a new purchase records the id from the Location header. TestMatchExistingPurchases and TestInboxAlreadyBooked pin the pure matchers. HOME is redirected to a temp dir, so the real mirror and core database are untouched. No live API call was made."
+}

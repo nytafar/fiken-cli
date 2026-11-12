@@ -5,6 +5,9 @@ author: "Lasse Jellum"
 license: "Apache-2.0"
 argument-hint: "<company-slug> <fra> <til> [surface: chrome|cdp]"
 allowed-tools: "Read Bash mcp__claude-in-chrome__*"
+metadata:
+  fiken-cli:
+    requires: "2.2.0"
 ---
 
 # Fiken Superføring
@@ -41,7 +44,7 @@ Every booking starts from a live bank line and ends with that line confirmed in 
 
 ## Run
 
-0. `fiken-cli version` prints 2.2.0 or newer; older, upgrade first (`fiken` skill, Prerequisites).
+0. `fiken-cli doctor --json`: every entry in `.skills` has `satisfied: true`. One that has not means the binary is older than this skill needs: run `.upgrade_command` first.
 1. Resolve `bankAccountId` for the account: `fiken-cli bank-accounts get <slug> --agent`.
 2. Open the panel for the period and read the lines. Method per surface:
    - CDP script against a headed Chrome, preferred; it starts by finding or starting the

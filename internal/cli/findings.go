@@ -121,6 +121,9 @@ type Report struct {
 	Total    int            `json:"total_findings"`
 	Undated  int            `json:"undated_documents"`
 	Params   map[string]any `json:"params,omitempty"`
+	// Excluded counts what a detector looked at and deliberately did not
+	// report, per class, so "zero findings" can be told from "nothing read".
+	Excluded map[string]int `json:"excluded,omitempty"`
 	Summary  []Group        `json:"summary"`
 	Findings []Finding      `json:"findings"`
 }
@@ -243,6 +246,17 @@ func RenderText(w io.Writer, r Report, limit int) {
 		fmt.Fprintf(w, ", %s %v", k, r.Params[k])
 	}
 	fmt.Fprintln(w)
+	if len(r.Excluded) > 0 {
+		classes := make([]string, 0, len(r.Excluded))
+		for class := range r.Excluded {
+			classes = append(classes, class)
+		}
+		sort.Strings(classes)
+		fmt.Fprintln(w, "\nNot reported (by class)")
+		for _, class := range classes {
+			fmt.Fprintf(w, "  %5d  %s\n", r.Excluded[class], class)
+		}
+	}
 	if r.Total == 0 {
 		fmt.Fprintln(w, "\nNothing found.")
 		return

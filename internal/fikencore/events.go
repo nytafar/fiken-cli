@@ -34,7 +34,16 @@ const (
 	OpSaleSettled       = "sale.settled"
 
 	// Inbox / documents.
-	OpInboxAdded = "inbox.added"
+	OpInboxAdded      = "inbox.added"
+	OpInboxDeleted    = "inbox.deleted"
+	OpAttachmentAdded = "attachment.added"
+
+	// Direct creates and edits the Superføring flows make through the
+	// generated commands (issue #27): the skill prescribes these names, so
+	// they are vocabulary, not growth.
+	OpPurchaseCreated = "purchase.created"
+	OpContactRenamed  = "contact.renamed"
+	OpMatchReversed   = "match.reversed"
 
 	// Browser "Superføring" surface (Round-2 UI test: bank-line lifecycle is
 	// create -> refresh -> confirm, recorded as voucher.created then
@@ -56,6 +65,11 @@ var knownOperations = map[string]struct{}{
 	OpPaymentRegistered: {},
 	OpSaleSettled:       {},
 	OpInboxAdded:        {},
+	OpInboxDeleted:      {},
+	OpAttachmentAdded:   {},
+	OpPurchaseCreated:   {},
+	OpContactRenamed:    {},
+	OpMatchReversed:     {},
 	OpVoucherCreated:    {},
 	OpLineClassified:    {},
 	OpFilterCreated:     {},

@@ -12,9 +12,10 @@ It has three parts:
 - **A local mirror of your books.** Twelve resources per company are synced into SQLite, so
   questions about history are answered offline, with SQL and full-text search, instead of
   through a rate-limited API.
-- **Checks and views on top of the mirror.** Rounding drift, VAT codes that deviate from a
-  supplier's pattern, duplicates, missing documentation, a VAT-return-shaped summary, and
-  revenue, cost and margin rollups.
+- **Checks and views on top of the mirror.** Which VAT terms are open or overdue, rounding
+  drift, VAT codes that deviate from a supplier's pattern, duplicates, missing
+  documentation, subscriptions that stopped being booked, a VAT-return-shaped summary
+  checked against the ledger, and revenue, cost and margin rollups.
 - **Bank-line matching in Superføring.** Fiken's own matching panel has no API. The
   `fiken-superforing` skill drives it in your browser while you watch: it reads the open
   lines, books paid purchases from them with the receipt attached, and confirms them.
@@ -23,10 +24,12 @@ It has three parts:
 
 | You want to | Ask the agent | It uses |
 | --- | --- | --- |
+| Know which VAT term is next | "Which MVA terms are open or overdue?" | `mva-status`: one row per term with due date, delivery, payment and state |
 | Know which bank lines are open and what lacks a receipt | "What is open in the bank for July and August?" | `fiken-superforing`, triage: reads and reports, writes nothing |
 | Book what the bank shows | "Book and confirm those lines" | `fiken-superforing`: one paid purchase per line, receipt attached, line confirmed |
+| Find purchases that were never booked | "Is any subscription missing for July and August?" | `recurring-gaps`: suppliers booked every month, with the months that have nothing |
 | Find errors before a VAT return | "Sweep July and August for errors" | `drift`, `vat-anomaly`, `duplicates`, `missing-bilag` |
-| See the VAT figure before you deliver | "What will the return for the term show?" | `mva-summary`, reconciled against the ledger |
+| See the VAT figure before you deliver | "What will the return for the term show?" | `mva-summary`: the buckets of the return, credit notes subtracted, compared with the ledger |
 | Look up how a supplier is usually booked | "How do we book this vendor?" | `vendor-profile`, the mirror |
 | See revenue, cost or margin for a period | "Margin per month this year" | `rollup` |
 
@@ -43,8 +46,10 @@ The first line installs the latest release binary into `~/.local/bin`, checksum-
 The second installs both skills, `fiken` and `fiken-superforing`, through
 [`npx skills`](https://skills.sh/).
 
-The skills in this repository describe `fiken-cli` 2.2.0. Check with `fiken-cli version`.
-If the installer gave you an older release, build from a clone:
+The skills in this repository describe `fiken-cli` 2.2.0 and say so in their frontmatter.
+`fiken-cli doctor` tells you when a newer release is out and when the binary is older than
+an installed skill needs, with the command to upgrade. If the installer gave you an older
+release than the skills describe, build from a clone:
 
 ```bash
 git clone https://github.com/nytafar/fiken-cli && cd fiken-cli
@@ -70,9 +75,10 @@ OAuth2 for acting on behalf of other companies: `fiken-cli auth login`. See
 
 This is the order that works, and the order the skills follow.
 
-1. **Find the open term.** A delivered term leaves a VAT settlement entry in the ledger, a
-   paid one a payment entry. The agent reads them from the mirror and tells you which terms
-   are delivered, paid, open or overdue.
+1. **Find the open term.** `mva-status` lists the year's terms with their due dates and says
+   which are delivered, paid, open or overdue. It reads the settlement entries Fiken posts
+   when a return is delivered and when it is paid, and warns when something was booked into
+   a term after its return went in.
 2. **Triage the bank lines.** The agent opens Superføring for the term's dates and sorts
    every open line: ready to confirm, needs a booking and has its receipt, needs a booking
    and lacks one, needs your verdict. You get that table before anything is written.
@@ -80,11 +86,17 @@ This is the order that works, and the order the skills follow.
    the bank amount, attaches the receipt, removes the inbox copy and confirms the line. A
    receipt that is not in the Fiken inbox is looked up in your mail, after asking you which
    mail access to use.
-4. **Sweep.** `drift`, `vat-anomaly` and `duplicates` for the period.
-5. **Check the figure.** `mva-summary` gives the buckets of the return. The amount to trust
-   is the ledger: the sum of the VAT accounts 2700 to 2713 for the period. See the known
-   gaps below for why the two can differ.
-6. **Deliver.** You open the return in Fiken, compare, and deliver.
+4. **Look for what is not there.** `recurring-gaps` lists the suppliers that were booked
+   month after month and then have a month with nothing, with the usual amount. It is a
+   hint for where to look in Superføring; the bank line decides whether there was a charge.
+5. **Sweep.** `drift`, `vat-anomaly`, `duplicates` and `missing-bilag` for the period.
+   `missing-bilag` reports purchases, sales and free postings without documentation, and
+   counts what it skipped (payments, settlements, salary) instead of listing it.
+6. **Check the figure.** `mva-summary` gives the buckets of the return with credit notes
+   subtracted, and compares its total with the VAT accounts in the ledger (2700 to 2719)
+   for the same dates. When the two differ by more than a krone it says so and shows which
+   kind of posting the difference sits in. The ledger is what the return is filed from.
+7. **Deliver.** You open the return in Fiken, compare, and deliver.
 
 ## The browser part
 
@@ -107,9 +119,11 @@ Setup and commands: [skills/fiken-superforing/surfaces/cdp.md](skills/fiken-supe
   reports and stops. It books and confirms only what you ask for.
 - **The bank line is the truth.** A purchase is booked with the bank's date and NOK amount,
   and the body is checked against the line before it is sent.
-- **No second booking of the same invoice.** Before a purchase is created, the supplier's
-  invoice number is looked up in the books. Receipts that are already booked can still sit
-  unused in the inbox, so the inbox proves nothing.
+- **No second booking of the same invoice.** `purchases create` and `commit` look the
+  supplier's invoice number up in Fiken before they post, and refuse with the existing
+  purchase, its date and whether it is paid. Receipts that are already booked can still sit
+  unused in the inbox, so the inbox proves nothing; `prepare` lists the purchases that
+  already carry an inbox document.
 - **An audit log.** Every purchase, payment, inbox deletion and confirmed line is appended
   to a local log with one correlation id per run.
 
@@ -127,20 +141,19 @@ Whether Superføring should move onto `commit` is an open design question, liste
 
 ## Known gaps
 
-Stated so that nothing above reads as a guarantee it is not. Each has an issue.
+Stated so that nothing above reads as a guarantee it is not.
 
-- `mva-summary` does not subtract credit notes, so a period with a credited invoice
-  overstates output VAT ([#24](https://github.com/nytafar/fiken-cli/issues/24)).
-- `purchases create` has no built-in guard against an invoice number that is already
-  booked; the skill does the lookup ([#25](https://github.com/nytafar/fiken-cli/issues/25))
-  and has to look the new purchase up afterwards, because the command returns no id
-  ([#26](https://github.com/nytafar/fiken-cli/issues/26)).
-- `missing-bilag` also lists payments, settlements and salary entries, which need no
-  documentation of their own ([#28](https://github.com/nytafar/fiken-cli/issues/28)).
+- `mva-summary` reads sales, credit notes and purchases. VAT that reaches the ledger some
+  other way, such as a point-of-sale settlement or a free posting on a VAT account, is not
+  in its buckets. It reports the difference against the ledger and names the kind of
+  posting, but the buckets stay short by that amount.
 - `bank-unverified` is anchored to the reconciled date Fiken reports per account. When that
   date is old, the list is long and says little; the open lines are in Superføring.
-- There is no command yet for term status ([#30](https://github.com/nytafar/fiken-cli/issues/30))
-  or for recurring suppliers with a missing month ([#31](https://github.com/nytafar/fiken-cli/issues/31)).
+- `recurring-gaps` sees suppliers, not cash purchases, and a month in progress can look
+  like a gap until the charge arrives.
+- A mirror built before the storage fixes can hold rows that belong to no company.
+  `doctor` reports them as `unowned_rows`. No command reads them and they change no figure,
+  but no resync removes them either.
 
 ## Documentation
 

@@ -9,6 +9,7 @@ package store
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -208,8 +209,103 @@ func (s *Store) ClearCompanyResources(resourceType, slug string) (int, error) {
 		}
 	}
 
+	// The typed table goes with it (issue #29). It is keyed by the same
+	// storage id, but a row written under an earlier id rule has no generic
+	// counterpart, so the delete addresses the company by the typed table's own
+	// parent column rather than by the ids just removed. Without this a scoped
+	// --full left the typed table holding each document twice and `doctor`
+	// reporting a disagreement the repair it recommends could not clear.
+	if HasTypedTable(canonical) && resourceParentKeyColumns[canonical] == "parent_id" {
+		if _, err := tx.Exec(fmt.Sprintf(`DELETE FROM "%s" WHERE parent_id = ?`, canonical), slug); err != nil {
+			return 0, err
+		}
+	}
+
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
 	return len(ids), nil
+}
+
+// CompanyRowCounts is one company's share of a parent-keyed resource: the rows
+// in `resources`, how many of them carry a bare storage key, and the rows in
+// the typed table. Company is "" for rows that name no company at all.
+type CompanyRowCounts struct {
+	Company   string
+	Resources int
+	BareKeys  int
+	Typed     int
+	HasTyped  bool
+}
+
+// CountByCompany breaks a parent-keyed resource down per company, so `doctor`
+// can say whose rows disagree (issue #29). ok=false when the resource carries
+// no company column to break down by (companies, and the child tables keyed on
+// their parent document), where only the mirror-wide counts exist.
+func (s *Store) CountByCompany(resourceType string) (counts []CompanyRowCounts, ok bool, err error) {
+	canonical, err := CanonicalResource(resourceType)
+	if err != nil {
+		return nil, false, err
+	}
+	if resourceParentKeyColumns[canonical] != "parent_id" {
+		return nil, false, nil
+	}
+	by := map[string]*CompanyRowCounts{}
+	get := func(company string) *CompanyRowCounts {
+		c := by[company]
+		if c == nil {
+			c = &CompanyRowCounts{Company: company, HasTyped: HasTypedTable(canonical)}
+			by[company] = c
+		}
+		return c
+	}
+
+	rows, err := s.db.Query(
+		`SELECT COALESCE(json_extract(data, '$.parent_id'), ''), COUNT(*), SUM(instr(id, char(0)) = 0)
+		   FROM resources WHERE resource_type = ? GROUP BY 1`, canonical)
+	if err != nil {
+		return nil, true, err
+	}
+	for rows.Next() {
+		var company string
+		var n, bare int
+		if err := rows.Scan(&company, &n, &bare); err != nil {
+			rows.Close()
+			return nil, true, err
+		}
+		c := get(company)
+		c.Resources, c.BareKeys = n, bare
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, true, err
+	}
+	rows.Close()
+
+	if HasTypedTable(canonical) {
+		typed, err := s.db.Query(fmt.Sprintf(`SELECT COALESCE(parent_id, ''), COUNT(*) FROM "%s" GROUP BY 1`, canonical))
+		if err != nil {
+			return nil, true, err
+		}
+		for typed.Next() {
+			var company string
+			var n int
+			if err := typed.Scan(&company, &n); err != nil {
+				typed.Close()
+				return nil, true, err
+			}
+			get(company).Typed = n
+		}
+		if err := typed.Err(); err != nil {
+			typed.Close()
+			return nil, true, err
+		}
+		typed.Close()
+	}
+
+	for _, c := range by {
+		counts = append(counts, *c)
+	}
+	sort.Slice(counts, func(i, j int) bool { return counts[i].Company < counts[j].Company })
+	return counts, true, nil
 }

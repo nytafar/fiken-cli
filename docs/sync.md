@@ -21,7 +21,12 @@ After upgrading past the mirror-key fix, refresh the two resources that were sto
 fiken-cli sync --full --company <slug> --resources journal_entries,bank_accounts
 ```
 
-`fiken-cli doctor` names any company still holding stale rows.
+`fiken-cli doctor` names the company each disagreement belongs to and puts its slug in the
+fix command. `fiken-cli doctor --company <slug>` limits the mirror checks to one company, so
+after a scoped full sync it reports nothing for that company whatever state the others are
+in. A full sync also clears the company's rows in the typed tables, which is what used to
+leave each inbox document there twice. Rows that name no company at all are reported as
+`unowned_rows`: no command reads them and no resync removes them.
 
 `--since` takes a duration (`7d`, `24h`, `1w`, `30m`) and asks Fiken for rows modified since
 then, on the seven resources whose list endpoints accept a date filter: contacts,

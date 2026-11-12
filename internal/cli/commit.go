@@ -12,10 +12,12 @@ package cli
 // pp:data-source live
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
 
+	"fiken-cli/internal/client"
 	"fiken-cli/internal/cliutil"
 	"fiken-cli/internal/fikencore"
 
@@ -24,19 +26,21 @@ import (
 
 func newNovelCommitCmd(flags *rootFlags) *cobra.Command {
 	var flagFile, flagCompany, dbPath, corePath string
-	var force, skipValidate bool
+	var force, skipValidate, allowDuplicate bool
 
 	cmd := &cobra.Command{
 		Use:   "commit",
 		Short: "Commit a validated posting to Fiken (idempotent, audited, date-aligned)",
 		Long: "Posts a purchase or general journal entry from a proposal (--file or stdin). Deduped against\n" +
 			"the idempotency map (a repeat of the same source no-ops), date-aligned to the bank-line date,\n" +
-			"and recorded in the append-only audit log in the same call. --dry-run previews the exact request;\n" +
-			"a real write requires --yes (or --agent).",
+			"and recorded in the append-only audit log in the same call. A purchase whose supplier already\n" +
+			"has the same invoice number in Fiken is refused with exit code 9 and the existing purchase is\n" +
+			"named; --idempotent reports it as done, --allow-duplicate posts anyway. --dry-run previews the\n" +
+			"exact request; a real write requires --yes (or --agent).",
 		Example: strings.Trim(`
   fiken-cli commit --file proposal.json --dry-run
   fiken-cli commit --file proposal.json --yes`, "\n"),
-		Annotations:  map[string]string{"mcp:read-only": "false", "pp:typed-exit-codes": "0,2,5"},
+		Annotations:  map[string]string{"mcp:read-only": "false", "pp:typed-exit-codes": "0,2,5,9"},
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			p, err := loadProposal(cmd, flagFile)
@@ -74,6 +78,23 @@ func newNovelCommitCmd(flags *rootFlags) *cobra.Command {
 				return &cliError{code: 2, err: err}
 			}
 
+			// A purchase the supplier already has under this invoice number is
+			// refused before anything is reserved or posted (#25). The
+			// idempotency map below only knows what commit itself posted; a
+			// source it has already committed keeps its own no-op answer.
+			var duplicates []existingPurchase
+			if entityType == "purchase" && !alreadyCommitted(cmd.Context(), corePath, p) {
+				verdict, derr := checkDuplicatePurchase(cmd.Context(), flags, p.CompanySlug, body, allowDuplicate)
+				switch {
+				case derr != nil && (flags.dryRun || cliutil.IsVerifyEnv()):
+					// A preview still previews; the real run will refuse.
+					fmt.Fprintf(cmd.ErrOrStderr(), "warning: %v\n", derr)
+				case derr != nil:
+					return &cliError{code: duplicateExitCode, err: derr}
+				}
+				duplicates = verdict.Existing
+			}
+
 			// Dry-run / verify: preview only, no mutation. Read-only idempotency
 			// lookup so the preview shows whether it would be a no-op.
 			if flags.dryRun || cliutil.IsVerifyEnv() {
@@ -84,14 +105,32 @@ func newNovelCommitCmd(flags *rootFlags) *cobra.Command {
 					}
 					core.Close()
 				}
-				return printJSONFiltered(cmd.OutOrStdout(), map[string]any{
-					"would_commit":       true,
+				preview := map[string]any{
+					"would_commit":       len(duplicates) == 0,
 					"idempotency_status": status,
 					"fiken_entity_type":  entityType,
 					"path":               path,
 					"request":            body,
 					"validation":         vres,
+				}
+				if len(duplicates) > 0 {
+					preview["reason"] = "duplicate_purchase"
+					preview["existing"] = duplicates
+				}
+				return printJSONFiltered(cmd.OutOrStdout(), preview, flags)
+			}
+			if len(duplicates) > 0 {
+				if flags.idempotent {
+					return printJSONFiltered(cmd.OutOrStdout(), map[string]any{
+						"committed": false, "reason": "already_exists",
+						"fiken_entity_type": entityType, "fiken_entity_id": fmt.Sprintf("%d", duplicates[0].PurchaseID),
+						"existing": duplicates,
+					}, flags)
+				}
+				_ = printJSONFiltered(cmd.OutOrStdout(), map[string]any{
+					"committed": false, "reason": "duplicate_purchase", "existing": duplicates,
 				}, flags)
+				return duplicateError(body, duplicates)
 			}
 
 			// Gate real writes behind explicit consent.
@@ -125,7 +164,10 @@ func newNovelCommitCmd(flags *rootFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			resp, statusCode, err := c.PostWithHeaders(cmd.Context(), path, body, map[string]string{"X-Request-ID": rid})
+			// Fiken answers a create with an empty body and a Location header,
+			// so the id comes off the header when the body has none (#26).
+			postCtx, created201 := client.NewLocationContext(cmd.Context())
+			resp, statusCode, err := c.PostWithHeaders(postCtx, path, body, map[string]string{"X-Request-ID": rid})
 			inputsJSON, _ := json.Marshal(p)
 			if err != nil || statusCode < 200 || statusCode >= 300 {
 				_ = core.Advance(cmd.Context(), p.CompanySlug, p.SourceSystem, p.SourceID, fikencore.StatusFailed, fikencore.AdvanceOpts{XRequestID: rid})
@@ -142,6 +184,9 @@ func newNovelCommitCmd(flags *rootFlags) *cobra.Command {
 			}
 
 			entityID := extractEntityID(resp, entityType)
+			if entityID == "" {
+				entityID = created201.ID()
+			}
 			_ = core.Advance(cmd.Context(), p.CompanySlug, p.SourceSystem, p.SourceID, fikencore.StatusCommitted,
 				fikencore.AdvanceOpts{FikenEntityType: entityType, FikenEntityID: entityID, XRequestID: rid})
 			eventID, _ := core.LogEvent(cmd.Context(), fikencore.Event{
@@ -161,9 +206,22 @@ func newNovelCommitCmd(flags *rootFlags) *cobra.Command {
 	cmd.Flags().StringVar(&flagCompany, "company", "", "Company slug (default: proposal's company_slug)")
 	cmd.Flags().BoolVar(&force, "force", false, "Commit even if validation reports errors")
 	cmd.Flags().BoolVar(&skipValidate, "skip-validate", false, "Skip client-side validation entirely")
+	cmd.Flags().BoolVar(&allowDuplicate, allowDuplicateFlag, false, "Commit a purchase even when the supplier already has one with this invoice number")
 	cmd.Flags().StringVar(&dbPath, "db", "", "Mirror database path (for the account check)")
 	cmd.Flags().StringVar(&corePath, "core-db", "", "Core DB path (idempotency + audit)")
 	return cmd
+}
+
+// alreadyCommitted reports whether the idempotency map holds this proposal's
+// source as committed or matched. Read-only: it reserves nothing.
+func alreadyCommitted(ctx context.Context, corePath string, p *fikencore.Proposal) bool {
+	core, err := fikencore.Open(ctx, corePath)
+	if err != nil {
+		return false
+	}
+	defer core.Close()
+	ex, found, _ := core.Lookup(ctx, p.CompanySlug, p.SourceSystem, p.SourceID)
+	return found && (ex.Status == fikencore.StatusCommitted || ex.Status == fikencore.StatusMatched)
 }
 
 // extractEntityID pulls the created entity's id from a Fiken create response,
